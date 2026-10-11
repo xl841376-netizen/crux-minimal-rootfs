@@ -100,6 +100,18 @@ make O=build73 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules_install INSTA
 
 ---
 
+## 3.x 默认凭据（root 通用密码）
+
+| 项 | 值 |
+|---|---|
+| 用户 | `root` |
+| **通用密码** | **`root`** |
+| SSH | 允许 root 用密码或 key 登录（`PermitRootLogin yes` / `PasswordAuthentication yes`） |
+
+构建时可覆盖：`sudo ROOT_PASS=你的密码 ./build.sh /mnt/target`
+
+> ⚠️ 出厂通用密码只为第一次进系统方便；**登录后第一件事就改掉**：`passwd root`
+
 ## 4. 已验证状态（2026-10-11 08:30 设备实测）
 
 显示（DSI ea8076，`card0-DSI-1=connected`）、GPU、触摸（`fts`）、按键、UFS、`/vendor`+`/mnt/sys` 只读读取、

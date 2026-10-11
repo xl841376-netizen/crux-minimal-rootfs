@@ -3,7 +3,7 @@
 #  crux（Xiaomi Mi 9 Pro 5G / SM8150）最小 rootfs 构建脚本
 #  用法:  sudo ./build.sh <目标目录>
 #  环境:  SUITE=resolute  (Ubuntu 26.04)  MIRROR=http://ports.ubuntu.com/ubuntu-ports
-#         ARCH=arm64
+#         ARCH=arm64   ROOT_PASS=root  (root 通用密码，可覆盖)
 # ============================================================
 set -euo pipefail
 
@@ -12,6 +12,7 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 SUITE=${SUITE:-resolute}
 MIRROR=${MIRROR:-http://ports.ubuntu.com/ubuntu-ports}
 ARCH=${ARCH:-arm64}
+ROOT_PASS=${ROOT_PASS:-root}
 
 # 需要开机启用的设备适配服务
 UNITS="rmtfs tqftpserv pd-mapper hexagonrpcd-sdsp crux-ssc-registry iris-vpu \
@@ -76,9 +77,17 @@ cat > "$DEST/etc/fstab" <<'EOF'
 # UUID=<在此填写> / ext4 defaults,noatime 0 1
 EOF
 [ -d "$DEST/root" ] || mkdir -p "$DEST/root"
-# 允许 root 用 ssh key 登录（设备调试用；也可改用普通用户）
 mkdir -p "$DEST/root/.ssh"; chmod 700 "$DEST/root/.ssh"
-sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin prohibit-password/' "$DEST/etc/ssh/sshd_config" 2>/dev/null || true
+
+# --- root 通用密码（默认 root，可用 ROOT_PASS=... 覆盖）---
+chroot "$DEST" /bin/bash -e <<CHROOT
+ echo "root:$ROOT_PASS" | chpasswd
+CHROOT
+# 允许 root 用密码或 key 登录（设备调试用）
+sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin yes/' "$DEST/etc/ssh/sshd_config"
+sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/' "$DEST/etc/ssh/sshd_config"
+grep -E '^(PermitRootLogin|PasswordAuthentication)' "$DEST/etc/ssh/sshd_config"
+echo "  root 通用密码已设为: $ROOT_PASS （务必登录后改掉）"
 
 umount "$DEST/dev" "$DEST/proc" "$DEST/sys" 2>/dev/null || true
 
