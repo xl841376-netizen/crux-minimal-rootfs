@@ -1,0 +1,12 @@
+[Unit]
+Description=SM8150 NPU boot (npu_boot24: Android-golden PAS sequence)
+After=multi-user.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c "rmmod npu_boot24 2>/dev/null; /sbin/insmod /usr/lib/modules/$(uname -r)/extra/npu_boot24.ko; sleep 1; dmesg | tail -5"
+RemainAfterExit=yes
+StandardOutput=journal
+
+[Install]
+WantedBy=multi-user.target

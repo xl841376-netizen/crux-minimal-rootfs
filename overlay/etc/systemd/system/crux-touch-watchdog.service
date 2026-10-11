@@ -1,0 +1,13 @@
+[Unit]
+Description=crux touch IC watchdog (periodic health check + auto recover)
+After=multi-user.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/crux-touch-watchdog.sh
+Restart=always
+RestartSec=5
+Nice=5
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,14 @@
+[Unit]
+Description=Qualcomm Iris VPU decoder (SM8150 legacy VPU5)
+After=multi-user.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/modprobe videocc-sm8150
+ExecStart=/usr/sbin/modprobe system_heap
+ExecStart=/usr/sbin/modprobe cma_heap
+ExecStart=/usr/sbin/modprobe qcom_iris
+
+[Install]
+WantedBy=multi-user.target

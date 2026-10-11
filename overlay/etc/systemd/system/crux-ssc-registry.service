@@ -1,0 +1,17 @@
+[Unit]
+Description=crux SSC sensor registry generation (HexagonRPCD file tree)
+Documentation=https://github.com/linux-msm/hexagonrpc
+After=local-fs.target
+Before=hexagonrpcd-sdsp.service
+Wants=local-fs.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/crux-ssc-registry-gen.sh
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=crux-ssc-registry
+
+[Install]
+WantedBy=multi-user.target

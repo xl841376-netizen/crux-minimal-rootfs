@@ -1,0 +1,11 @@
+[Unit]
+Description=crux fastrpc guard (rewritten)
+After=multi-user.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/crux-fastrpc-guard.sh
+
+[Install]
+WantedBy=multi-user.target

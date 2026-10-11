@@ -1,0 +1,86 @@
+#!/usr/bin/env python3
+"""
+npuctl —— NPU 服务客户端
+用法:
+  npuctl status                 # 优先 unix socket /run/npu.sock
+  npuctl run -p 3               # 跑基准
+  npuctl -s crux.local run -p 3 # 指定 TCP 服务（跨机/容器）
+  npuctl --raw run -p 1         # 只输出原始 JSON 一行
+  npuctl -                # 从 stdin 读一行作为请求
+"""
+import json, socket, sys, os
+
+UNIX = "/run/npu.sock"
+PORT = 5300
+DEFAULT_HOST = None
+
+args = sys.argv[1:]
+pretty = True
+if "--raw" in args:
+    args.remove("--raw")
+    pretty = False
+if args and args[0] in ("-s", "--server"):
+    DEFAULT_HOST = args[1]
+    args = args[2:]
+
+if args and args[0] == "-":
+    req = sys.stdin.readline().strip()
+else:
+    req = " ".join(args) if args else "status"
+
+resp = None
+errs = []
+
+if DEFAULT_HOST is None and os.path.exists(UNIX):
+    try:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(900)
+        s.connect(UNIX)
+        s.sendall((req + "\n").encode())
+        buf = b""
+        while b"\n" not in buf:
+            d = s.recv(65536)
+            if not d:
+                break
+            buf += d
+        resp = buf.decode(errors="replace").strip().splitlines()[0]
+    except Exception as e:
+        errs.append("unix: %s" % e)
+    finally:
+        try:
+            s.close()
+        except Exception:
+            pass
+
+if resp is None:
+    host = DEFAULT_HOST or "127.0.0.1"
+    try:
+        s = socket.create_connection((host, PORT), timeout=10)
+        s.settimeout(900)
+        s.sendall((req + "\n").encode())
+        buf = b""
+        while b"\n" not in buf:
+            d = s.recv(65536)
+            if not d:
+                break
+            buf += d
+        resp = buf.decode(errors="replace").strip().splitlines()[0]
+    except Exception as e:
+        errs.append("tcp %s:%d: %s" % (host, PORT, e))
+    finally:
+        try:
+            s.close()
+        except Exception:
+            pass
+
+if resp is None:
+    print(json.dumps({"ok": False, "error": "; ".join(errs) or "no response"}, ensure_ascii=False))
+    sys.exit(1)
+
+try:
+    obj = json.loads(resp)
+    print(json.dumps(obj, ensure_ascii=False, indent=None if not pretty else 2))
+    sys.exit(0 if obj.get("ok") else 1)
+except Exception:
+    print(resp)
+    sys.exit(0)

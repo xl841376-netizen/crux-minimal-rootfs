@@ -1,0 +1,12 @@
+[Unit]
+Description=Crux GPU stats as standard DRM interface (sysfs for GNOME Resources)
+After=multi-user.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/crux-gpu-iface.sh
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,11 @@
+[Unit]
+Description=Crux sensor name adapter (expose hwmon as cpu-thermal for GNOME Resources)
+After=multi-user.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/crux-sensor-adapt.sh
+
+[Install]
+WantedBy=multi-user.target

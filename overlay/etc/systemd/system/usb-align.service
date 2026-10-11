@@ -1,0 +1,11 @@
+[Unit]
+Description=USB ECM active ARP alignment
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/usb-align.sh
+
+[Install]
+WantedBy=multi-user.target

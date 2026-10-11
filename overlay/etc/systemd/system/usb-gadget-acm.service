@@ -1,0 +1,12 @@
+[Unit]
+Description=crux USB ECM gadget
+After=sys-kernel-config.mount
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/usb-gadget-acm.sh start
+ExecStop=/usr/local/bin/usb-gadget-acm.sh stop
+
+[Install]
+WantedBy=multi-user.target

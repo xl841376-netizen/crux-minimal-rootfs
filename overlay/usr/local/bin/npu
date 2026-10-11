@@ -1,0 +1,187 @@
+#!/bin/bash
+# npu —— crux 主线 SM8150 NPU 通用调用接口
+# 用法: npu <cmd> [args] [--json]
+set -u
+
+TD=/root/npu_test
+SHIM=$TD/libnpu_shim.so
+JSON=0
+
+args=()
+for a in "$@"; do
+    if [ "$a" = "--json" ]; then JSON=1; continue; fi
+    args+=("$a")
+done
+set -- ${args[@]+"${args[@]}"}
+
+cmd=${1:-help}
+[ $# -gt 0 ] && shift
+
+jesc() { printf '%s' "$1" | tr -d '\r\n' | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+
+c_up() {
+    ln -sf /dev/fastrpc-cdsp        /dev/cdsprpc-smd        2>/dev/null
+    ln -sf /dev/fastrpc-cdsp-secure /dev/adsprpc-smd-secure 2>/dev/null
+    ln -sf /dev/fastrpc-adsp        /dev/adsprpc-smd        2>/dev/null
+    ln -sf /dev/fastrpc-sdsp        /dev/sdsprpc-smd        2>/dev/null
+    mkdir -p /mnt/sys /mnt/vend /system /vendor
+    mountpoint -q /mnt/sys  || mount -o ro /dev/sda33 /mnt/sys  2>/dev/null
+    mountpoint -q /mnt/vend || mount -o ro /dev/sda32 /mnt/vend 2>/dev/null
+    mountpoint -q /system || mount --bind /mnt/sys/system /system 2>/dev/null
+    mountpoint -q /vendor || mount --bind /mnt/vend /vendor       2>/dev/null
+    lsmod | grep -q '^npucc_sm8150 '  || insmod $TD/npucc-sm8150.ko 2>/dev/null
+    lsmod | grep -q '^ion_compat '    || insmod $TD/ion_compat.ko    2>/dev/null
+    lsmod | grep -q '^msm_npu '       || insmod $TD/msm_npu.ko       2>/dev/null
+    [ -e /dev/msm_npu ] && [ -x /vendor/bin/npu_launcher ]
+}
+
+c_run() {
+    R_P=1
+    while [ $# -gt 0 ]; do case "$1" in -p) R_P=$2; shift 2;; *) shift;; esac; done
+    c_up || { echo "环境不就绪"; return 1; }
+    export LD_PRELOAD=$SHIM
+    dmesg -C 2>/dev/null
+    : > /tmp/npu_out.txt
+    script -qec "/vendor/bin/npu_launcher -p $R_P" /tmp/npu_out.txt >/dev/null 2>&1
+    OUT=$(tr -d "\r" < /tmp/npu_out.txt 2>/dev/null)
+    R_TIME=$(echo "$OUT"  | grep -oE 'NPU only *: *[0-9.]+' | tail -1 | grep -oE '[0-9.]+')
+    R_LAYERS=$(echo "$OUT"| grep -oE 'Total Num Layers Executed *:? *[0-9]+' | tail -1 | grep -oE '[0-9]+$')
+    R_LINE=$(echo "$OUT"  | grep -E 'Classified label' | tail -1)
+    R_LABEL=$(echo "$R_LINE" | grep -oE '[0-9]+' | head -1)
+    R_NAME=$(echo "$R_LINE" | sed -E 's/.*Classified label:? *[0-9]+ *//')
+    [ -z "$R_NAME" ] && R_NAME=$(echo "$OUT" | grep -A1 'Classified label' | tail -1 | tr -d '\r')
+    R_HANDLE=$(echo "$OUT"| grep -oE 'handle = 0x[0-9a-fA-F]+' | tail -1 | awk '{print $3}')
+    R_BOOT=$(dmesg | grep -c 'NPU BOOTED')
+    [ -n "$R_TIME" ] || return 1
+    return 0
+}
+
+c_times() {
+    local n=${1:-3} i
+    for i in $(seq 1 $n); do
+        c_run 1 || return 1
+        echo "$R_TIME"
+        sleep 0.5
+    done
+}
+
+c_status() {
+    M_NPU=$(lsmod | grep -c '^msm_npu ')
+    M_CC=$(lsmod  | grep -c '^npucc_sm8150 ')
+    M_ION=$(lsmod | grep -c '^ion_compat ')
+    D_NPU=$([ -e /dev/msm_npu ] && echo 1 || echo 0)
+    D_ION=$([ -e /dev/ion ] && echo 1 || echo 0)
+    PWR=$(cat /sys/devices/virtual/npu/msm_npu/pwr 2>/dev/null)
+    FW=$(cat /sys/devices/virtual/npu/msm_npu/fw_state 2>/dev/null)
+    D=/sys/kernel/debug/clk
+    CLK_CORE=$(cat $D/npu_cc_npu_core_clk_src/clk_rate 2>/dev/null)
+    CLK_CAL=$(cat  $D/npu_cc_cal_dp_clk_src/clk_rate 2>/dev/null)
+    CLK_PLL0=$(cat $D/npu_cc_pll0/clk_rate 2>/dev/null)
+    CLK_CRC=$(cat  $D/npu_cc_crc_div/clk_rate 2>/dev/null)
+    [ -e /dev/msm_npu ] || return 1
+}
+
+c_clk() {
+    D=/sys/kernel/debug/clk
+    if [ $# -eq 0 ]; then
+        for c in $D/npu_cc_*; do
+            [ -f "$c/clk_rate" ] || continue
+            printf '%-30s %s\n' "$(basename $c)" "$(cat $c/clk_rate 2>/dev/null)"
+        done
+        return 0
+    fi
+    local name=$1 rate=${2:-}
+    [ -d "$D/$name" ] || { echo "无此时钟: $name"; return 1; }
+    if [ -n "$rate" ]; then
+        echo "$rate" > "$D/$name/clk_rate" 2>/dev/null || { echo "写失败"; return 1; }
+    fi
+    cat "$D/$name/clk_rate"
+}
+
+c_log() { dmesg | grep -iE 'msm_npu|npucc|fastrpc|pas_' | tail -${1:-15}; }
+
+c_down() {
+    rmmod msm_npu 2>/dev/null; rmmod ion_compat 2>/dev/null; rmmod npucc_sm8150 2>/dev/null
+    ! lsmod | grep -qE '^(msm_npu|npucc_sm8150) '
+}
+
+c_help() {
+cat <<'EOF'
+npu -- crux 主线 SM8150 NPU 通用接口
+
+  npu up                环境就绪（软链/挂载/insmod），幂等
+  npu run [-p N]        跑一次推理基准（N=1..5，默认 1）
+  npu times [N]         连跑 N 次并列出耗时（默认 3）
+  npu status            状态总览
+  npu clk [名 [Hz]]     列 / 读 / 写 NPU 时钟
+  npu log [N]           最近 N 行 NPU 内核日志
+  npu down              卸载模块（释放固件区）
+  npu serve             stdin 行协议服务，每行命令回一行 JSON
+  npu help
+
+  全局加 --json 输出单行 JSON。退出码 0=OK 1=失败。
+示例:
+  npu run -p 3 --json
+  npu clk npu_cc_cal_dp_clk_src 908000000
+  echo 'run -p 1' | npu serve
+EOF
+}
+
+rc=0
+case "$cmd" in
+  up)     if c_up; then rc=0; else rc=1; fi
+          [ $JSON = 1 ] && echo "{\"ok\":$([ $rc = 0 ] && echo true || echo false),\"cmd\":\"up\"}" ;;
+  run)    if c_run "$@"; then rc=0; else rc=1; fi
+          if [ $JSON = 1 ]; then
+              if [ $rc = 0 ]; then
+                  echo "{\"ok\":true,\"p\":${R_P:-1},\"layers\":${R_LAYERS:-0},\"time_ms\":${R_TIME:-0},\"label\":${R_LABEL:-0},\"name\":\"$(jesc "${R_NAME:-}")\",\"handle\":\"${R_HANDLE:-}\",\"boot\":${R_BOOT:-0}}"
+              else
+                  echo "{\"ok\":false,\"cmd\":\"run\",\"error\":\"execute failed\"}"
+              fi
+          else
+              if [ $rc = 0 ]; then
+                  echo "层数: ${R_LAYERS:-?}    NPU only: ${R_TIME} ms"
+                  echo "分类: ${R_LABEL:-?} ${R_NAME:-}"
+                  echo "handle: ${R_HANDLE:-?}"
+              else
+                  echo "运行失败（npu log 看内核侧）"; c_log 8
+              fi
+          fi ;;
+  times)  N=${1:-3}
+          if c_times $N >/tmp/npu_times.txt; then rc=0; else rc=1; fi
+          TS=$(awk '{printf "%s%s",(NR>1?",":""),$1}' /tmp/npu_times.txt)
+          if [ $JSON = 1 ]; then
+              echo "{\"ok\":$([ $rc = 0 ] && echo true || echo false),\"n\":$N,\"runs\":[${TS}]}"
+          else
+              [ -n "$TS" ] && echo "${TS}" | tr ',' '\n'
+          fi ;;
+  status) if c_status; then rc=0; else rc=1; fi
+          if [ $JSON = 1 ]; then
+              echo "{\"ok\":$([ $rc = 0 ] && echo true || echo false),\"modules\":{\"msm_npu\":${M_NPU:-0},\"npucc\":${M_CC:-0},\"ion\":${M_ION:-0}},\"dev\":{\"msm_npu\":${D_NPU:-0},\"ion\":${D_ION:-0}},\"pwr\":\"${PWR:-}\",\"fw_state\":\"${FW:-}\",\"clocks\":{\"pll0\":${CLK_PLL0:-0},\"crc_div\":${CLK_CRC:-0},\"cal_dp\":${CLK_CAL:-0},\"npu_core\":${CLK_CORE:-0}}}"
+          else
+              echo "模块   msm_npu=$M_NPU npucc=$M_CC ion=$M_ION    设备 /dev/msm_npu=$D_NPU /dev/ion=$D_ION"
+              echo "固件   pwr=${PWR:-?} fw_state=${FW:-?}"
+              printf '时钟   pll0=%s crc_div=%s cal_dp=%s npu_core=%s\n' \
+                "${CLK_PLL0:-0}" "${CLK_CRC:-0}" "${CLK_CAL:-0}" "${CLK_CORE:-0}"
+          fi ;;
+  clk)    out=$(c_clk "$@"); rc=$?
+          if [ $JSON = 1 ]; then
+              if [ $# -ge 1 ]; then echo "{\"ok\":$([ $rc = 0 ] && echo true || echo false),\"clk\":\"$1\",\"rate\":${out:-0}}"
+              else echo "{\"ok\":true,\"list\":[$(printf '%s\n' "$out" | awk '{printf "%s{\"n\":\"%s\",\"r\":%s}",(NR>1?",":""),$1,$2}')]}"
+              fi
+          else echo "$out"; fi ;;
+  log)    c_log "${1:-15}" ;;
+  down)   if c_down; then rc=0; else rc=1; fi
+          [ $JSON = 1 ] && echo "{\"ok\":$([ $rc = 0 ] && echo true || echo false),\"cmd\":\"down\"}" ;;
+  serve)  echo '{"ok":true,"cmd":"serve","proto":"line","ready":true}'
+          while IFS= read -r line; do
+              [ -z "$line" ] && continue
+              out=$("$0" $line --json 2>&1 | tr '\n' ' ')
+              [ -z "$out" ] && out='{"ok":false,"error":"empty"}'
+              printf '%s\n' "$out"
+          done
+          exit 0 ;;
+  help|--help|-h) c_help ;;
+  *) echo "未知命令: $cmd"; c_help; rc=1 ;;
+esac
+exit $rc

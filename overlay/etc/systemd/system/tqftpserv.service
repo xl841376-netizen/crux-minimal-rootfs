@@ -1,0 +1,12 @@
+[Unit]
+Description=QRTR TFTP service
+After=qrtr-ns.service pd-mapper.service
+Wants=qrtr-ns.service
+
+[Service]
+ExecStart=/usr/local/bin/tqftpserv -d
+Restart=always
+StateDirectory=tqftpserv
+
+[Install]
+WantedBy=multi-user.target

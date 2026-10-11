@@ -1,0 +1,20 @@
+[Unit]
+Description=FastRPC file server for the Qualcomm SDSP (sensor DSP)
+Documentation=https://github.com/linux-msm/hexagonrpc
+After=local-fs.target pd-mapper.service qrtr-ns.service rmtfs.service
+Wants=pd-mapper.service qrtr-ns.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/hexagonrpcd -f /dev/fastrpc-sdsp -d sdsp -s -R /usr/share/qcom
+# SLPI 重启/崩溃时自动重新 attach；节点还没出现时也会失败重试
+Restart=always
+RestartSec=2
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=hexagonrpcd
+OOMScoreAdjust=-500
+
+[Install]
+WantedBy=multi-user.target

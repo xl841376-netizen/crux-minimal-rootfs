@@ -1,0 +1,200 @@
+#!/usr/bin/env python3
+"""
+npu-svc —— crux 设备上的 NPU 常驻服务
+提供两个命令接口（同一套协议）：
+  · unix socket : /run/npu.sock      （本机程序调用）
+  · TCP         : 0.0.0.0:5300       （局域网/容器/AI 调用）
+
+协议：一次连接发一行，回一行 JSON。
+  纯文本:  run -p 3
+  JSON  :  {"cmd":"run","p":3}
+支持命令: ping status run times clk log up down help
+所有实际动作都转交 /usr/local/bin/npu，保证单一事实来源。
+"""
+import json, os, socket, subprocess, sys, threading, time
+
+SOCK_PATH = "/run/npu.sock"
+TCP_PORT  = 5300          # 仅在 NPU_SVC_TCP=1 时监听（默认关，调用统一走 ssh）
+CLI       = "/usr/local/bin/npu"
+LOG_FILE  = "/var/log/npu-svc.log"
+
+LOCK = threading.Lock()
+START = time.time()
+STATS = {"requests": 0, "errors": 0}
+
+
+def log(msg):
+    line = time.strftime("[%F %T] ") + str(msg)
+    print(line, flush=True)
+    try:
+        with open(LOG_FILE, "a") as f:
+            f.write(line + "\n")
+    except Exception:
+        pass
+
+
+def run_cli(args, timeout=600):
+    """调用 npu CLI，取其 JSON 输出"""
+    try:
+        p = subprocess.run([CLI] + list(args) + ["--json"],
+                           capture_output=True, text=True, timeout=timeout)
+        for ln in reversed((p.stdout or "").strip().splitlines()):
+            ln = ln.strip()
+            if ln.startswith("{"):
+                for strict in (True, False):
+                    try:
+                        return json.loads(ln, strict=strict)
+                    except Exception:
+                        pass
+        err = (p.stderr or p.stdout or "no output").strip().replace("\n", " ")[:200]
+        return {"ok": False, "error": err}
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": "timeout"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+HELP = {
+    "ok": True,
+    "service": "npu-svc",
+    "protocol": "one line in, one JSON line out",
+    "commands": {
+        "ping": "存活探测",
+        "status": "模块/设备/固件/时钟总览",
+        "run": '{"cmd":"run","p":1}  跑一次推理基准，p=1..5',
+        "times": '{"cmd":"times","n":3}  连跑 N 次',
+        "clk": '{"cmd":"clk","name":"npu_cc_cal_dp_clk_src"} 或带 rate 写',
+        "log": '{"cmd":"log","n":15}  内核日志',
+        "up": "环境就绪（软链/挂载/insmod），幂等",
+        "down": "卸载模块（释放固件区）",
+    },
+    "examples": ["run -p 1", "status", '{"cmd":"run","p":3}'],
+}
+
+
+def handle(req):
+    if isinstance(req, str):
+        parts = req.split()
+        d = {"cmd": parts[0] if parts else "help"}
+        for i, a in enumerate(parts):
+            if a == "-p" and i + 1 < len(parts):
+                d["p"] = parts[i + 1]
+            elif a == "-n" and i + 1 < len(parts):
+                d["n"] = parts[i + 1]
+            elif parts[0] == "clk" and i > 0 and not a.startswith("-"):
+                d.setdefault("name", a)
+                if i + 1 < len(parts) and parts[i + 1].isdigit():
+                    d["rate"] = parts[i + 1]
+        req = d
+    if not isinstance(req, dict):
+        return {"ok": False, "error": "bad request"}
+
+    cmd = str(req.get("cmd", "help")).lower()
+    with LOCK:
+        STATS["requests"] += 1
+        if cmd == "help":
+            return HELP
+        if cmd == "ping":
+            return {"ok": True, "service": "npu-svc", "uptime_s": int(time.time() - START),
+                    "stats": STATS, "pid": os.getpid()}
+        if cmd == "status":
+            return run_cli(["status"], timeout=60)
+        if cmd == "up":
+            return run_cli(["up"], timeout=120)
+        if cmd == "down":
+            return run_cli(["down"], timeout=120)
+        if cmd == "run":
+            return run_cli(["run", "-p", str(req.get("p", 1))], timeout=300)
+        if cmd == "times":
+            return run_cli(["times", str(req.get("n", 3))], timeout=900)
+        if cmd == "clk":
+            args = ["clk"]
+            if req.get("name"):
+                args.append(str(req["name"]))
+                if req.get("rate"):
+                    args.append(str(req["rate"]))
+            return run_cli(args, timeout=60)
+        if cmd == "log":
+            return run_cli(["log", str(req.get("n", 15))], timeout=60)
+        return {"ok": False, "error": "unknown cmd: %s" % cmd}
+
+
+def serve_conn(conn, addr):
+    try:
+        conn.settimeout(900)
+        buf = b""
+        while True:
+            try:
+                data = conn.recv(4096)
+            except socket.timeout:
+                break
+            if not data:
+                break
+            buf += data
+            while b"\n" in buf:
+                line, buf = buf.split(b"\n", 1)
+                line = line.strip()
+                if not line:
+                    continue
+                text = line.decode("utf-8", "replace")
+                try:
+                    req = json.loads(text)
+                except Exception:
+                    req = text
+                try:
+                    resp = handle(req)
+                except Exception as e:
+                    STATS["errors"] += 1
+                    resp = {"ok": False, "error": str(e)}
+                try:
+                    conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n").encode())
+                except Exception:
+                    return
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def tcp_loop():
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.bind(("0.0.0.0", TCP_PORT))
+    s.listen(8)
+    log("TCP 接口就绪: 0.0.0.0:%d" % TCP_PORT)
+    while True:
+        conn, addr = s.accept()
+        log("TCP 连接 %s" % (addr,))
+        threading.Thread(target=serve_conn, args=(conn, addr), daemon=True).start()
+
+
+def unix_loop():
+    try:
+        os.unlink(SOCK_PATH)
+    except FileNotFoundError:
+        pass
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.bind(SOCK_PATH)
+    os.chmod(SOCK_PATH, 0o666)
+    s.listen(8)
+    log("unix 接口就绪: %s" % SOCK_PATH)
+    while True:
+        conn, _ = s.accept()
+        threading.Thread(target=serve_conn, args=(conn, None), daemon=True).start()
+
+
+def main():
+    log("=== npu-svc 启动 (pid %d) ===" % os.getpid())
+    log("环境就绪检查: %s" % json.dumps(run_cli(["up"], timeout=120), ensure_ascii=False))
+    if os.environ.get("NPU_SVC_TCP", "0") == "1":
+        threading.Thread(target=tcp_loop, daemon=True).start()
+    else:
+        log("TCP 接口未开启（默认走 ssh 命令调用）")
+    threading.Thread(target=unix_loop, daemon=True).start()
+    while True:
+        time.sleep(3600)
+
+
+if __name__ == "__main__":
+    main()
