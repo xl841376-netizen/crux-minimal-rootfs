@@ -264,6 +264,24 @@ rm -rf "$RFS/tmp/"* "$RFS/var/tmp/"* "$RFS/var/log/"* 2>/dev/null || true
 rm -f "$RFS"/etc/ssh/ssh_host_* 2>/dev/null || true
 mkdir -p "$RFS/var/log"
 
+# ---- 权限归一（否则 sshd StrictModes 会拒绝公钥登录、sudo 会报错）----
+chmod 755 "$RFS/root" 2>/dev/null || true
+chown root:root "$RFS/root" 2>/dev/null || true
+[ -d "$RFS/root/.ssh" ] && chmod 700 "$RFS/root/.ssh" && chown -R root:root "$RFS/root/.ssh"
+[ -f "$RFS/root/.ssh/authorized_keys" ] && chmod 600 "$RFS/root/.ssh/authorized_keys"
+# 家目录也不能 world-writable
+for d in "$RFS"/home/*; do
+  [ -d "$d" ] || continue
+  chmod 755 "$d" 2>/dev/null || true
+done
+# 全局扫一遍：/ 下不允许 777 的顶层目录（tar 解包常带出 777）
+for d in "$RFS"/*; do
+  [ -d "$d" ] || continue
+  m=$(stat -c %a "$d" 2>/dev/null || echo 755)
+  case "$m" in *777*) echo "   修正 777: ${d#$RFS} ($m -> 755)"; chmod 755 "$d";; esac
+done
+echo "   权限归一完成：/root=$(stat -c %a "$RFS/root" 2>/dev/null)"
+
 echo "== [6/6] 打包"
 NAME="crux-rootfs-${SUITE}-arm64-$(date +%Y%m%d)"
 ( cd "$RFS" && tar -I "zstd -19 -T0" -cf "$OUT/$NAME.tar.zst" . )
