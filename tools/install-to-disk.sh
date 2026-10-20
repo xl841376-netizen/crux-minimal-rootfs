@@ -8,6 +8,8 @@ MODE="auto"
 TAR=""; ROOTDEV=""; ESPDEV=""; EFI=""; KERNEL=""; DTB=""; INITRD=""
 MU=""; LABEL="linux-root"; ROOT_SIZE="24G"; ESP_SIZE="512M"
 MKFS=0; FLASH_MU=1; WAIT_SEC=180; DISK_ARG=""
+FROM_USERDATA=""; APPLY=0; DRY_RUN=0
+FROM_USERDATA=""; APPLY=0; DRY_RUN=0
 ROOTMN=/mnt/cruxroot; ESPMN=/mnt/cruxesp
 
 usage() {
@@ -15,7 +17,7 @@ usage() {
 刷机包模式（自动识别设备并分区）:
   install-to-disk.sh --auto --tar <rootfs.tar.zst> --efi <BOOTAA64.EFI>
                      --kernel <Image> --dtb <dtb> [--initrd <initramfs.cpio.gz>]
-                     [--mu <Mu-crux.img>] [--root-size 24G] [--esp-size 512M]
+                     [--mu <Mu-crux.img>] [--root-size 24G|rest] [--esp-size 512M|128M]
                      [--no-flash-mu] [--wait 180]
 
 已知分区模式:
@@ -27,10 +29,14 @@ usage() {
   --auto          自动识别 USB mass storage 盘，缺分区时自动创建
   --mu            Mu 固件镜像；存在 fastboot 设备时先 fastboot flash boot
   --no-flash-mu   跳过 fastboot 步骤
-  --root-size     新建根分区大小，默认 24G
-  --esp-size      新建 ESP 大小，默认 512M
+  --root-size     新建根分区大小：24G / 40G / 80000M 任意填写，或 rest 占满剩余空间，默认 24G
+  --esp-size      新建 ESP 大小：128M / 512M / 自定义，默认 512M
   --wait          等待 USB 盘枚举的秒数，默认 180
   --disk          指定盘（如 /dev/loop48），跳过 USB 识别
+  --from-userdata 从 userdata 尾部释放空间，例 40G（盘上无其他空闲时使用）
+  --apply         真正执行 userdata 缩容（不带则只打印计划）
+  --from-userdata 从 userdata 尾部释放空间，例 40G（盘上无其他空闲时使用）
+  --apply         真正执行 userdata 缩容（不带则只打印计划）
 EOM
 }
 
@@ -51,6 +57,10 @@ while [ $# -gt 0 ]; do
     --esp-size) ESP_SIZE="$2"; shift 2 ;;
     --wait) WAIT_SEC="$2"; shift 2 ;;
     --disk) DISK_ARG="$2"; shift 2 ;;
+    --from-userdata) FROM_USERDATA="$2"; shift 2 ;;
+    --apply) APPLY=1; shift ;;
+    --from-userdata) FROM_USERDATA="$2"; shift 2 ;;
+    --apply) APPLY=1; shift ;;
     --mkfs) MKFS=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "未知参数: $1"; usage; exit 1 ;;
@@ -65,6 +75,35 @@ for f in "$TAR" "$EFI" "$KERNEL" "$DTB"; do
 done
 if [ -n "$INITRD" ] && [ ! -f "$INITRD" ]; then echo "文件不存在: $INITRD"; exit 1; fi
 if [ -n "$MU" ] && [ ! -f "$MU" ]; then echo "文件不存在: $MU"; exit 1; fi
+
+size_ok() {
+  case "$1" in
+    rest|REST|all|ALL) return 0 ;;
+    [0-9]*[MGmg]) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+size_ok "$ESP_SIZE" || { echo "ESP 大小格式无效: $ESP_SIZE（例 128M / 512M / 1G）"; exit 1; }
+size_ok "$ROOT_SIZE" || { echo "根分区大小格式无效: $ROOT_SIZE（例 24G / 40G / rest）"; exit 1; }
+if [ -n "$FROM_USERDATA" ]; then
+  size_ok "$FROM_USERDATA" || { echo "释放量格式无效: $FROM_USERDATA（例 40G / 30000M）"; exit 1; }
+fi
+if [ -n "$FROM_USERDATA" ]; then
+  size_ok "$FROM_USERDATA" || { echo "释放量格式无效: $FROM_USERDATA（例 40G / 30000M）"; exit 1; }
+fi
+
+size_mb() {
+  local v="$1"
+  case "$v" in
+    *[Mm]) echo "${v%[Mm]}" ;;
+    *[Gg]) echo "$(( ${v%[Gg]} * 1024 ))" ;;
+    *) echo 0 ;;
+  esac
+}
+ESP_MB="$(size_mb "$ESP_SIZE")"
+[ "$ESP_MB" -ge 128 ] 2>/dev/null || echo "提示: ESP $ESP_SIZE 偏小，引导件约需 80M，建议 128M 或 512M"
+ROOT_MB="$(size_mb "$ROOT_SIZE")"
+[ "$ROOT_MB" -ge 6144 ] 2>/dev/null || [ "$ROOT_MB" = "0" ] || echo "提示: 根分区 $ROOT_SIZE 小于 6G，解压后系统约需 6G"
 [ "$(id -u)" = "0" ] || { echo "需要 root 权限"; exit 1; }
 
 cleanup() {
@@ -108,6 +147,61 @@ find_part() {
   return 1
 }
 
+# 从 userdata 尾部释放空间（resize2fs 缩文件系统 → 改小分区 → 留出空隙）
+# 参数：$1=盘名 $2=释放量 返回：FREED_START/FREED_END（可用扇区范围）
+shrink_userdata() {
+  local disk="$1" release="$2" udname udnum uddev start end rel_sec new_end fs_k new_mb minsz
+  udname="$(find_part "$disk" userdata || true)"
+  [ -n "$udname" ] || { echo "未找到 PARTLABEL=userdata"; return 1; }
+  udnum="${udname#"$disk"}"
+  udnum="${udnum#p}"
+  mknode "$udname" || { echo "无法创建 /dev/$udname"; return 1; }
+  uddev="/dev/$udname"
+
+  if findmnt -no SOURCE "$uddev" >/dev/null 2>&1; then
+    echo "userdata 正在挂载，缩容前需先卸载"; return 1
+  fi
+
+  start="$(sgdisk -i "$udnum" "/dev/$disk" | awk '/First sector/{print $3}')"
+  end="$(sgdisk -i "$udnum" "/dev/$disk" | awk '/Last sector/{print $3}')"
+  [ -n "$start" ] && [ -n "$end" ] || { echo "读取 userdata 分区范围失败"; return 1; }
+
+  case "$release" in
+    *[Mm]) rel_sec=$(( ${release%[Mm]} * 2048 )) ;;
+    *[Gg]) rel_sec=$(( ${release%[Gg]} * 2097152 )) ;;
+    *) echo "释放量单位需为 M 或 G"; return 1 ;;
+  esac
+  new_end=$(( end - rel_sec ))
+  if [ "$new_end" -le "$start" ]; then echo "释放量超过 userdata 大小"; return 1; fi
+  fs_k=$(( (new_end - start + 1) * 512 / 1024 ))
+
+  echo "== userdata 现状: 分区 $start-$end（$(( (end-start+1)/2097152 ))GiB）"
+  echo "== 计划: 缩到 $start-$new_end（约 $(( fs_k / 1048576 ))GiB），释放 ${release}"
+  echo "   resize2fs $uddev $(( fs_k / 1024 ))M"
+  echo "   sgdisk --delete=$udnum /dev/$disk"
+  echo "   sgdisk --new=$udnum:$start:$new_end --typecode=$udnum:A03A --change-name=$udnum:userdata /dev/$disk"
+
+  if [ "$APPLY" != "1" ]; then
+    echo "== 未加 --apply，仅打印计划"
+    DRY_RUN=1
+  else
+    local bk="/root/gpt-backup-$(basename "$disk")-$(date +%Y%m%d-%H%M%S).bin"
+    sgdisk --backup="$bk" "/dev/$disk" >/dev/null
+    echo "== GPT 已备份: $bk"
+    e2fsck -fp "$uddev" || true
+    resize2fs "$uddev" "$(( fs_k / 1024 ))M"
+    sgdisk --delete="$udnum" "/dev/$disk"
+    sgdisk --new="$udnum:$start:$new_end" --typecode="$udnum:A03A"            --change-name="$udnum:userdata" "/dev/$disk"
+    partprobe "/dev/$disk" 2>/dev/null || true
+    sleep 2
+    echo "== userdata 缩容完成"
+  fi
+
+  FREED_START=$(( new_end + 1 ))
+  FREED_END="$end"
+  return 0
+}
+
 # 1. fastboot 刷 Mu
 if [ "$MODE" = "auto" ] && [ "$FLASH_MU" = "1" ] && [ -n "$MU" ]; then
   if fastboot devices 2>/dev/null | grep -q .; then
@@ -134,20 +228,61 @@ if [ "$MODE" = "auto" ]; then
     done
     [ -n "$DISK" ] || { echo "未找到 USB 盘，确认设备处于 mass 模式后重试"; exit 1; }
   fi
-  echo "== 目标盘 /dev/$DISK ($(cat /sys/class/block/$DISK/size) 扇区)"
+  BLOCKS="$(cat /sys/class/block/$DISK/size)"
+  echo "== 目标盘 /dev/$DISK 容量 $(( BLOCKS / 2097152 ))GiB（$BLOCKS 扇区）"
+  echo "== ESP=$ESP_SIZE  根分区=$ROOT_SIZE"
   mknode "$DISK" || { echo "无法创建 /dev/$DISK"; exit 1; }
 
-  # 3. 缺分区则创建
+  # 3. 空间来源：盘上无空闲时从 userdata 尾部切
   ESPNAME="$(find_part "$DISK" efi || true)"
   ROOTNAME="$(find_part "$DISK" "$LABEL" || true)"
+  FREESTART=""; FREEEND=""
 
-  if [ -z "$ESPNAME" ]; then
-    echo "== 创建 ESP ($ESP_SIZE, PARTLABEL=efi)"
-    sgdisk --new=0:0:+"$ESP_SIZE" --typecode=0:ef00 --change-name=0:efi "/dev/$DISK"
-  fi
-  if [ -z "$ROOTNAME" ]; then
-    echo "== 创建根分区 ($ROOT_SIZE, PARTLABEL=$LABEL)"
-    sgdisk --new=0:0:+"$ROOT_SIZE" --typecode=0:8300 --change-name=0:"$LABEL" "/dev/$DISK"
+  if [ -z "$ESPNAME" ] || [ -z "$ROOTNAME" ]; then
+    FREE_TXT="$(sgdisk -p "/dev/$DISK" | grep -E '^Total free space')"
+    echo "== $FREE_TXT"
+    if [ -n "$FROM_USERDATA" ]; then
+      shrink_userdata "$DISK" "$FROM_USERDATA" || exit 1
+      if [ "$DRY_RUN" = "1" ]; then
+        echo "== 分区表未改动；确认后加 --apply 执行"
+        exit 0
+      fi
+      FREESTART="$FREED_START"; FREEEND="$FREED_END"
+      echo "== userdata 之后可用扇区: $FREESTART-$FREEEND"
+    fi
+
+    mkpart() { # $1=分区号或0 $2=起点扇区或0 $3=终点规格 $4=类型码 $5=名称
+      sgdisk --new="$1:$2:$3" --typecode="$1:$4" --change-name="$1:$5" "/dev/$DISK"
+    }
+
+    if [ -z "$ESPNAME" ]; then
+      echo "== 创建 ESP ($ESP_SIZE, PARTLABEL=efi)"
+      if [ -n "$FREESTART" ]; then
+        mkpart 0 "$FREESTART" "+$ESP_SIZE" ef00 efi
+        FREESTART=$(( $(sgdisk -i "$(sgdisk -p "/dev/$DISK" | awk '/efi$/{print $1}' | tail -1)" "/dev/$DISK" | awk '/Last sector/{print $3}') + 1 ))
+      else
+        mkpart 0 0 "+$ESP_SIZE" ef00 efi
+      fi
+    fi
+    if [ -z "$ROOTNAME" ]; then
+      case "$ROOT_SIZE" in
+        rest|REST|all|ALL)
+          if [ -n "$FREEEND" ]; then
+            echo "== 创建根分区（占满 userdata 释放的空间, PARTLABEL=$LABEL）"
+            mkpart 0 "$FREESTART" "$FREEEND" 8300 "$LABEL"
+          else
+            echo "== 创建根分区（占满剩余空间, PARTLABEL=$LABEL）"
+            mkpart 0 0 0 8300 "$LABEL"
+          fi ;;
+        *)
+          echo "== 创建根分区 ($ROOT_SIZE, PARTLABEL=$LABEL)"
+          if [ -n "$FREESTART" ]; then
+            mkpart 0 "$FREESTART" "+$ROOT_SIZE" 8300 "$LABEL"
+          else
+            mkpart 0 0 "+$ROOT_SIZE" 8300 "$LABEL"
+          fi ;;
+      esac
+    fi
   fi
 
   if [ -z "$ESPNAME" ] || [ -z "$ROOTNAME" ]; then
