@@ -5,9 +5,15 @@ name: rootfs-build
 on:
   workflow_dispatch:
     inputs:
-      level:
-        description: '基础包档位'
+      package_set:
+        description: '包集：sda37 = 按 deps/lists/sda37.list 全量对齐在役机；level = 按档位'
         required: true
+        default: sda37
+        type: choice
+        options: [sda37, level]
+      level:
+        description: '基础包档位（package_set=level 时生效）'
+        required: false
         default: standard
         type: choice
         options: [minimal, standard, full]
@@ -64,12 +70,25 @@ jobs:
       - name: 构建 rootfs 包
         run: |
           set -e
-          sudo ./mkimage.sh "$PWD/out" \
-            --fw-dir "$PWD/fw" \
-            --level "${{ inputs.level }}" \
-            --suite "${{ inputs.suite }}" \
-            --mirror "$MIRROR" \
-            --kver "${{ inputs.kver }}"
+          if [ "${{ inputs.package_set }}" = "sda37" ]; then
+            echo "包集: 对齐在役机 sda37（$(wc -l < deps/lists/sda37.list) 个包）"
+            sudo ./mkimage.sh "$PWD/out" \
+              --fw-dir "$PWD/fw" \
+              --selections "$PWD/deps/lists/sda37.list" \
+              --root-label linux-root \
+              --suite "${{ inputs.suite }}" \
+              --mirror "$MIRROR" \
+              --kver "${{ inputs.kver }}"
+          else
+            echo "包集: 档位 ${{ inputs.level }}"
+            sudo ./mkimage.sh "$PWD/out" \
+              --fw-dir "$PWD/fw" \
+              --level "${{ inputs.level }}" \
+              --root-label linux-root \
+              --suite "${{ inputs.suite }}" \
+              --mirror "$MIRROR" \
+              --kver "${{ inputs.kver }}"
+          fi
           ls -lh out/
 
       - name: 体检（关键路径必须在包内）
@@ -86,15 +105,27 @@ jobs:
                    ./lib/firmware/ath10k/WCN3990/hw1.0/firmware-5.bin \
                    ./usr/sbin/NetworkManager ./usr/bin/pipewire \
                    ./usr/sbin/qsee-supplicant ./usr/sbin/qsee-app-loader \
-                   ./usr/local/sbin/crux-swap-setup.sh; do
+                   ./usr/local/sbin/crux-swap-setup.sh \
+                   ./usr/sbin/gdm3 ./usr/bin/gnome-shell /usr/share/wayland-sessions/ubuntu.desktop \
+                   ./usr/local/bin/tqftpserv ./usr/local/bin/hexagonrpcd ./usr/local/lib/libqrtr.so.1 \
+                   ./usr/local/bin/pd-mapper ./usr/local/bin/rmtfs \
+                   ./etc/NetworkManager/conf.d/unmanaged-usb0.conf; do
             tar -tf "$T" | grep -qx -- "$f" || { echo "包内缺少 $f"; exit 1; }
           done
           echo "启用链接数: $(tar -tf "$T" | grep -c 'multi-user.target.wants')"
           echo "x50 误启用: $(tar -tf "$T" | grep 'x50' | grep -c wants || true)"
+          # 产物不得包含 WiFi 认证数据（netplan yaml 必须为 0）
+          n=$(tar -tf "$T" | grep -c 'etc/netplan/.*\.yaml' || true)
+          echo "netplan yaml 数量（应为 0）: $n"
+          [ "$n" = "0" ] || { echo "!! 产物里含 WiFi 认证数据"; exit 1; }
+          echo "模块 ko 数: $(tar -tf "$T" | grep -c 'modules/.*\.ko$' || true)"
+          echo "extra 目录条目（应为 0）: $(tar -tf "$T" | grep -c 'modules/.*/extra/' || true)"
+          echo "gnome-shell 文件数: $(tar -tf "$T" | grep -c 'usr/share/gnome-shell' || true)"
 
       - uses: actions/upload-artifact@v4
+        if: ${{ !inputs.publish_release }}
         with:
-          name: crux-rootfs-${{ inputs.suite }}-${{ inputs.level }}-${{ github.sha }}
+          name: crux-rootfs-${{ inputs.suite }}-${{ inputs.package_set }}-${{ github.sha }}
           path: |
             out/*.tar.zst
             out/SHA256SUMS
@@ -108,8 +139,8 @@ jobs:
           set -e
           TAG="rootfs-$(date +%Y%m%d-%H%M)"
           gh release create "$TAG" \
-            -t "crux rootfs ${{ inputs.suite }} arm64 (${{ inputs.level }})" \
-            -n "自动构建。基础系统 + L1 ${{ inputs.level }} + 适配 overlay + 固件 + 内核模块 ${{ inputs.kver }}。
+            -t "crux rootfs ${{ inputs.suite }} arm64 (${{ inputs.package_set }})" \
+            -n "云端自动构建。包集=${{ inputs.package_set }}（sda37 时按 deps/lists/sda37.list 全量 1666 包对齐在役机，含 GNOME+gdm3）。产物含固件 + 内核模块 ${{ inputs.kver }}，不含 WiFi 认证数据。
 
           用法：解压到新根分区，改 grub 的 root=UUID，见仓库 README §3.1。
           默认 root 密码 root，登录后请改。" \
