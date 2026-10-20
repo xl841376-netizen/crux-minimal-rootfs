@@ -221,6 +221,13 @@ chroot "$RFS" /bin/bash -c "echo 'root:$ROOT_PASS' | chpasswd"
 sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin yes/' "$RFS/etc/ssh/sshd_config"
 sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/' "$RFS/etc/ssh/sshd_config"
 
+# ---- ssh 必开：显式 enable ssh.service（Ubuntu 24+ 只给 ssh.socket，socket 链断则 22 不监听）----
+if [ -f "$RFS/usr/lib/systemd/system/ssh.service" ]; then
+  mkdir -p "$RFS/etc/systemd/system/multi-user.target.wants"
+  ln -sf /usr/lib/systemd/system/ssh.service "$RFS/etc/systemd/system/multi-user.target.wants/ssh.service"
+  echo "   已 enable ssh.service（multi-user.target.wants）"
+fi
+
 # ---- crux 用户（桌面登录用；组与在役机器一致）----
 if ! chroot "$RFS" id crux >/dev/null 2>&1; then
   chroot "$RFS" /bin/bash -c "useradd -m -s /bin/bash -G sudo,audio,video,input,render,netdev,dialout,lp,tty crux && echo 'crux:${CRUX_PASS:-crux}' | chpasswd" \
@@ -244,7 +251,7 @@ XMODIFIERS=@im=ibus
 LANG=zh_CN.UTF-8
 ENVEOF
 
-UNITS="gdm3 rmtfs tqftpserv pd-mapper hexagonrpcd-sdsp crux-ssc-registry iris-vpu npu-svc crux-fastrpc-guard crux-touch-watchdog usb-gadget-acm usb-align qsee-supplicant modem-mnt qcom-subsys-start crux-audio-route crux-time-sync crux-swap crux-ufs-stable ufs-nopm crux-charger-init crux-crashsave crux-markshutdown crux-kmsg-tap dmesg-snap power-snap"
+UNITS="gdm3 ssh rmtfs tqftpserv pd-mapper hexagonrpcd-sdsp crux-ssc-registry iris-vpu npu-svc crux-fastrpc-guard crux-touch-watchdog usb-gadget-acm usb-align qsee-supplicant modem-mnt qcom-subsys-start crux-audio-route crux-time-sync crux-swap crux-ufs-stable ufs-nopm crux-charger-init crux-crashsave crux-markshutdown crux-kmsg-tap dmesg-snap power-snap"
 TIMERS="crux-time-sync.timer qcom-subsys-start.timer"
 ok=0; fail=""
 for u in $UNITS; do systemctl --root="$RFS" enable "$u.service" >/dev/null 2>&1 && ok=$((ok+1)) || fail="$fail $u"; done

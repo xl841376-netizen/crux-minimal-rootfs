@@ -115,7 +115,9 @@ jobs:
                    ./usr/local/bin/tqftpserv ./usr/local/bin/hexagonrpcd \
                    ./usr/local/lib/libqrtr.so.1 \
                    ./usr/local/bin/pd-mapper ./usr/local/bin/rmtfs \
-                   ./etc/NetworkManager/conf.d/unmanaged-usb0.conf; do
+                   ./etc/NetworkManager/conf.d/unmanaged-usb0.conf \
+                   ./etc/systemd/system/multi-user.target.wants/ssh.service \
+                   ./etc/systemd/system/display-manager.service; do
             if grep -qx -- "$f" "$L"; then
               echo "  OK   $f"
             else
