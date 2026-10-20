@@ -10,6 +10,8 @@ MU=""; LABEL="linux-root"; ROOT_SIZE="24G"; ESP_SIZE="512M"
 MKFS=0; FLASH_MU=1; WAIT_SEC=180; DISK_ARG=""
 FROM_USERDATA=""; APPLY=0; DRY_RUN=0; DO_REBOOT=1; LAYOUT_ONLY=0; PLAN_ONLY=0
 ROOTMN=/mnt/cruxroot; ESPMN=/mnt/cruxesp
+SCRIPT_DIR="$(cd "$(dirname "$0")" 2>/dev/null && pwd)"
+EXTRA_DIR="$SCRIPT_DIR/extra"
 
 usage() {
   cat <<'EOM'
@@ -536,6 +538,13 @@ echo "== 解压 rootfs 到根分区"
     *.tar)            tar -xpf "$TAR" -C "$ROOTMN" ;;
     *) echo "未知压缩格式: $TAR"; exit 1 ;;
   esac
+
+  # 附加文件（脚本同目录的 extra/）：按相对路径覆盖到根分区
+  # 例：extra/usr/lib/aarch64-linux-gnu/dri/vpu_drv_video.so
+  if [ -n "${EXTRA_DIR:-}" ] && [ -d "$EXTRA_DIR" ]; then
+    echo "== 应用附加文件: $EXTRA_DIR"
+    ( cd "$EXTRA_DIR" && tar -cf - . ) | tar -xpf - -C "$ROOTMN"
+  fi
 
 ROOTUUID="$(blkid -s UUID -o value "$ROOTDEV")"
 PARTLABEL="$(blkid -s PARTLABEL -o value "$ROOTDEV" || true)"
