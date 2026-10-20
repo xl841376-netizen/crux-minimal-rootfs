@@ -24,32 +24,50 @@ crux 最小 rootfs 第三方组件版权与许可声明
 源码：本仓库 src/iris-vaapi/
 
 --------------------------------------------------------------------
-三、Hexagon / QRTR 用户态组件
+三、Hexagon RPC 用户态组件（GPLv3）
 --------------------------------------------------------------------
-组件：hexagonrpcd、libhexagonrpc、chrecd、rmtfs、pd-mapper、tqftpserv
+组件：hexagonrpcd、libhexagonrpc、chrecd、sscregistrygen
 上游：https://github.com/linux-msm/hexagonrpc
-      https://github.com/linux-msm/rmtfs
+许可：GNU General Public License v3（见该仓库 COPYING）
+版权：各上游项目作者
+说明：GPLv3 要求在分发时提供对应源码，并对可作为 User Product 交付的场景提供安装信息；
+      本系统对应的源码获取方式见同目录 SOURCE 文件。
+
+--------------------------------------------------------------------
+四、QRTR / 远程文件系统服务（BSD 3-Clause）
+--------------------------------------------------------------------
+组件：rmtfs、pd-mapper、tqftpserv
+上游：https://github.com/linux-msm/rmtfs
       https://github.com/linux-msm/pd-mapper
       https://github.com/linux-msm/tqftpserv
 许可：BSD 3-Clause（以各上游仓库 LICENSE 为准，再分发需保留版权声明与许可文本）
-版权：各上游项目作者
+版权：Linaro Ltd. 及各上游项目作者
 
 --------------------------------------------------------------------
-四、Ubuntu 基础系统与软件包
+五、libssc 与 ssccli（GPLv3）
+--------------------------------------------------------------------
+组件：libssc、ssccli
+上游：https://github.com/linux-msm/libssc
+许可：GNU General Public License v3（见该仓库 LICENSE）
+版权：各上游项目作者
+说明：ssccli 为该库附带的命令行工具；分发包含该工具时，应同时提供 libssc 与 ssccli 的对应源码。
+
+--------------------------------------------------------------------
+六、Ubuntu 基础系统与软件包
 --------------------------------------------------------------------
 组件：Ubuntu 26.04.1 LTS（resolute）aarch64 基础系统及 apt 安装的全部软件包
 许可：各自软件包许可（自由软件为主，少量 multiverse 组件另有条款），见 /usr/share/doc/<包名>/copyright
 说明：本系统为非官方修改版本，名称中的 Ubuntu 仅用于说明来源；Ubuntu 与 Canonical 为 Canonical Ltd. 的商标。
 
 --------------------------------------------------------------------
-五、GNOME 桌面
+七、GNOME 桌面
 --------------------------------------------------------------------
 组件：GNOME Shell、Mutter、GDM 及 GNOME 应用
 许可：GPLv2 / LGPLv2.1+ 等，见对应软件包的 copyright 文件
 说明：GNOME 名称为 GNOME Foundation 的商标，本系统非 GNOME 官方发行版。
 
 --------------------------------------------------------------------
-六、固件（专有二进制，不授予许可）
+八、固件（专有二进制，不授予许可）
 组件：/lib/firmware 下的 Qualcomm 平台固件，包括但不限于基带（modem/mpss）、
       DSP（adsp、cdsp、slpi）、GPU（a630）、视频（venus）、WiFi（WCN3990）等
 权利人：Qualcomm Technologies, Inc. 及其关联公司
@@ -62,14 +80,18 @@ crux 最小 rootfs 第三方组件版权与许可声明
 说明：这些文件由使用者从自身持有的设备提取。请勿公开再分发含这些固件的完整镜像。
 
 --------------------------------------------------------------------
-七、来源待确认的组件
+九、本项目自行编写的组件与外部依赖
 --------------------------------------------------------------------
-组件：npu、npuctl、npu-svc、ssccli、sscregistrygen
-状态：来源与许可未确认，未声明为任何开源许可分发
-说明：若无法确认授权，建议从公开分发包中移除。
+自写组件：npu、npuctl、npu-svc、crux-npu、crux-connect，以及 overlay 内的 systemd 单元、
+          脚本、udev 规则、UCM 配置、sysctl/modprobe 配置
+状态：由本项目作者编写，随本项目提供，不适用第三方开源许可条款。
+运行依赖（均不随本包分发）：
+- NPU：本机 /root/npu_test 下自行编译的 msm_npu.ko、npucc-sm8150.ko、ion_compat.ko 与 libnpu_shim.so
+- 原厂 vendor 分区中的 libnpu.so、npu_launcher（Qualcomm 专有二进制，不随本系统分发）
+说明：缺少上述依赖时，NPU 相关命令只提供接口，无法实际执行推理。
 
 --------------------------------------------------------------------
-八、其他
+十、其他
 --------------------------------------------------------------------
 - crux 自写的 systemd 单元、shell 脚本、udev 规则、UCM 配置、sysctl/modprobe 配置：
   由本项目作者编写，随本项目一并提供，供个人使用与修改。
