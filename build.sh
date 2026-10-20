@@ -25,11 +25,12 @@ crux-kmsg-tap dmesg-snap power-snap"
 TIMERS="crux-time-sync.timer qcom-subsys-start.timer"
 
 # 注意：SIM / 外挂 X50（sdx50m）那一整套【不在这里启用】。
-#   overlay/opt/crux/sim-x50/ 里按系统路径镜像保存着全部 x50-* 单元与程序，
-#   但它们落在 /opt/crux/sim-x50，不会自动生效；需要时在设备上执行：
-#       crux-sim-x50 enable      # 铺回 /etc、/usr/local 并 enable
-#       crux-sim-x50 status      # 查看
-#       crux-sim-x50 disable     # 撤掉
+#   overlay 里 x50-* 的单元、程序、udev 规则、modprobe 参数都按原路径就位（本机专用，
+#   不做镜像目录），但上面 UNITS 里一个都没列 → 没 enable → 开机不启动，SIM 侧不参与。
+#   需要时在设备上：
+#       crux-sim-x50 enable      # 把 x50-* 全部 enable（下次开机或 start 生效）
+#       crux-sim-x50 status      # 看开关值与各单元状态
+#       crux-sim-x50 disable     # disable --now，文件仍留在原处
 #   默认值记录在 /etc/crux-sim.conf 的 SIM_X50_ENABLE=0。
 
 need() { command -v "$1" >/dev/null || { echo "缺少 $1，请先 apt-get install -y $2"; exit 1; }; }

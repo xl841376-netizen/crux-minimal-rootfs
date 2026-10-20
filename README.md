@@ -104,12 +104,31 @@
 
 少了这些，关机时会白等满 90 秒。
 
-### 2.7 SIM / 外挂 X50（sdx50m）—— 整套保留，默认不安装
+### 2.7 SIM / 外挂 X50（sdx50m）—— 原样就位，默认不启动
 
-外挂 X50 基带（SIM 侧）那一套在设备上已存在但尚未定型，这里**原样保留**，但不参与默认启动：
+这套东西是**本机专用**的（不是通用镜像），所以文件就按原样待在系统路径里，不做镜像目录、不做安装/卸载动作。
+开关只决定一件事：**这些单元要不要开机起来**。
 
 | 项 | 说明 |
 |---|---|
+| 文件位置 | 就按原路径：`etc/systemd/system/x50-*`、`etc/systemd/system/{modem-mgr,tqftpserv-v3,crux-x50-poweroff}`、`usr/local/{bin,sbin}/x50-*` 等、`etc/udev/rules.d/{77-mm-x50-*,99-x50-nopm}`、`etc/modprobe.d/{x50-mhi,ipa_mhi_proxy}.conf` |
+| 内容（70 个文件） | 15 个单元 + 13 个 drop-in + 约 30 个程序（`x50-modem-loader`、`x50-qmi-*`、`x50-pdc-*`、`mdm_helper_native`、`mhi_efs_sync`、`pm_service_native`、`qmisd`、`q2*/q5*/qmi/qraw` 等）+ 3 条 udev + 2 个 modprobe 参数 |
+| **默认状态** | 文件在，但**没有任何 `*.wants` 链接、`build.sh` 的 UNITS 里也不列** → 开机不启动，SIM 侧不参与 |
+| 开关文件 | `/etc/crux-sim.conf` 的 `SIM_X50_ENABLE`（**默认 0**） |
+| 打开 | `crux-sim-x50 enable` → 把 15 个单元全部 `systemctl enable`；要立刻生效再 `systemctl start x50-modem-boot` |
+| 关闭 | `crux-sim-x50 disable` → `systemctl disable --now` 这 15 个单元（**文件不动**，随时可再 enable） |
+| 查看 | `crux-sim-x50 status` |
+
+**为什么默认不启动**：X50 那条链（MHI → IPA → QMI → UIM provisioning session `0x38`）还没跑通，
+曾出现过“做 QMI 操作把整机拖死”的情况。默认状态下参与基带的只有**内置四个子系统**
+（`mpss` / `adsp` / `cdsp` / `slpi`，由 `qcom-subsys-start` 拉起），SIM 侧完全不介入——
+`qcom-subsys-start.service` 里也已去掉 `x50-rfs-persist` 那个依赖。
+
+> 注意：`x50-mhi.conf` / `ipa_mhi_proxy.conf` 放在 `etc/modprobe.d/` 只是“参数就位”，
+> 默认没有任何路径去 `modprobe ipa_mhi_proxy`（那条 `insmod` 在 `x50-modem-boot.sh` 里），
+> 所以不 enable 时它们不产生效果。
+
+---|---|
 | 存放位置 | `overlay/opt/crux/sim-x50/` —— 按**系统绝对路径镜像**存放（`etc/systemd/system/…`、`usr/local/bin/…`），套用 overlay 后落在 `/opt/crux/sim-x50/`，**不生效** |
 | 内容（70 个文件） | 15 个单元（`x50-modem-boot` / `x50-online` / `x50-qmi-l4` / `x50-qmi-l5` / `x50-card-monitor` / `x50-liveness` / `x50-efs-sync` / `x50-gen3` / `x50-pdc` / `x50-rfs-persist` / `x50-uim-prepare` / `x50-uim-activate` / `modem-mgr` / `tqftpserv-v3` / `crux-x50-poweroff`）+ 13 个 drop-in + 30 个程序（`x50-modem-loader`、`x50-qmi-*`、`x50-pdc-*`、`mdm_helper_native`、`mhi_efs_sync`、`pm_service_native`、`qmisd`、`q2*/q5*/qmi/qraw` 等调试脚本）+ 3 条 udev 规则（`77-mm-x50-efs` / `77-mm-x50-fusion` / `99-x50-nopm`）+ 2 个 modprobe 参数（`x50-mhi.conf` / `ipa_mhi_proxy.conf`） |
 | 开关 | `/etc/crux-sim.conf` 的 `SIM_X50_ENABLE`（**默认 0**） |

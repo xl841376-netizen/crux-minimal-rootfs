@@ -1,23 +1,23 @@
 #!/bin/sh
 # crux SIM / X50（外挂 sdx50m 基带）开关
-#   整套文件常驻在 /opt/crux/sim-x50/ 下（按系统绝对路径镜像），**默认不安装**。
-#   enable  : 把它们铺回 /etc、/usr/local…，enable 相关单元
-#   disable : 停掉并 disable 单元，从系统路径移除这些文件（/opt 下的副本保留）
-#   status  : 看开关值、是否已安装、各单元状态
+#
+# 这套文件是【本机专用】，就按原样待在系统路径里（/etc/systemd/system、/usr/local/...），
+# 不做镜像目录、不做安装/卸载。开关只做一件事：**让不让这些单元开机起来**。
+#   默认（本仓库没 enable 过）：单元文件在，但没有任何 *.wants 链接 → 开机不启动 → SIM 侧不参与。
+#   enable  : systemctl enable 全部单元（下次开机才起；要立刻起用 start）
+#   disable : systemctl disable --now 全部单元（文件保留，随时可再开）
 set -u
-SRC=/opt/crux/sim-x50
 CONF=/etc/crux-sim.conf
 UNITS="x50-modem-boot x50-online x50-qmi-l4 x50-qmi-l5 x50-card-monitor x50-liveness \
 x50-efs-sync x50-gen3 x50-pdc x50-rfs-persist x50-uim-prepare x50-uim-activate \
 modem-mgr tqftpserv-v3 crux-x50-poweroff"
 
 set_conf() {
-    if [ -w "$CONF" ] || [ -w "$(dirname $CONF)" ]; then
-        if [ -f "$CONF" ] && grep -q '^SIM_X50_ENABLE=' "$CONF"; then
-            sed -i "s/^SIM_X50_ENABLE=.*/SIM_X50_ENABLE=$1/" "$CONF"
-        else
-            echo "SIM_X50_ENABLE=$1" >> "$CONF"
-        fi
+    [ -d "$(dirname $CONF)" ] || return 0
+    if [ -f "$CONF" ] && grep -q '^SIM_X50_ENABLE=' "$CONF"; then
+        sed -i "s/^SIM_X50_ENABLE=.*/SIM_X50_ENABLE=$1/" "$CONF"
+    else
+        echo "SIM_X50_ENABLE=$1" >> "$CONF"
     fi
 }
 
@@ -25,38 +25,25 @@ case "${1:-status}" in
 status)
     v=0; [ -r "$CONF" ] && v=$(sed -n 's/^SIM_X50_ENABLE=//p' "$CONF" | tail -1)
     echo "SIM_X50_ENABLE=$v   (配置文件: $CONF)"
-    if [ -f /etc/systemd/system/x50-modem-boot.service ]; then
-        echo "系统路径: 已安装"
-    else
-        echo "系统路径: 未安装（默认状态）"
-    fi
+    echo "单元文件是否就位: $([ -f /etc/systemd/system/x50-modem-boot.service ] && echo 是（现在系统路径里） || echo 否)"
     for u in $UNITS; do
         printf "  %-22s active=%-9s enabled=%s\n" "$u" \
             "$(systemctl is-active $u 2>/dev/null)" "$(systemctl is-enabled $u 2>/dev/null)"
     done
     ;;
 enable)
-    [ -d "$SRC" ] || { echo "错误: $SRC 不存在"; exit 1; }
-    echo "== 铺文件到系统路径"
-    ( cd "$SRC" && find . -type f -print0 | while IFS= read -r -d '' f; do
-        mkdir -p "/$(dirname "$f")"; cp -a "$f" "/$f"; done )
-    udevadm control --reload-rules 2>/dev/null
-    systemctl daemon-reload
     for u in $UNITS; do
-        systemctl enable "$u" >/dev/null 2>&1 && echo "  enabled $u"
+        systemctl enable "$u" >/dev/null 2>&1 && echo "  enabled $u" || echo "  !! 失败 $u"
     done
     set_conf 1
-    echo "== 完成。现在可 systemctl start x50-modem-boot（或直接重启）"
+    echo "== 已完成。要立刻生效：systemctl start x50-modem-boot（或直接重启）"
     ;;
 disable)
-    for u in $UNITS; do systemctl disable --now "$u" >/dev/null 2>&1; done
-    echo "== 从系统路径移除文件"
-    ( cd "$SRC" && find . -type f -print0 | while IFS= read -r -d '' f; do
-        rm -f "/$f"; done )
-    udevadm control --reload-rules 2>/dev/null
-    systemctl daemon-reload
+    for u in $UNITS; do
+        systemctl disable --now "$u" >/dev/null 2>&1 && echo "  disabled $u"
+    done
     set_conf 0
-    echo "== 完成（$SRC 下的副本保留，随时可再 enable）"
+    echo "== 已完成（单元文件仍留在系统路径，随时可再 crux-sim-x50 enable）"
     ;;
 *)
     echo "用法: $0 {status|enable|disable}"; exit 2
