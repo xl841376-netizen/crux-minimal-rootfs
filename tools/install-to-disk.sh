@@ -120,16 +120,45 @@ mknode() {
 }
 
 # 找一个 USB 附着的 sd 盘（排除宿主自身盘）
+# Mu 的 mass 盘标识：VID:PID 05c6:f000 / Product "USB MASS STORAGE"
+#                   SCSI vendor Qualcomm / model "MMC Storage"，约 476GiB
 find_usb_disk() {
-  local d name real
+  local d name real vendor model fallback=""
   for d in /sys/class/block/sd*; do
     name="$(basename "$d")"
     case "$name" in sd[a-z]) ;; *) continue ;; esac
     [ -e "$d/partition" ] && continue
     real="$(readlink -f "$d/device" 2>/dev/null || true)"
-    case "$real" in *usb*) echo "$name"; return 0 ;; esac
+    case "$real" in *usb*) ;; *) continue ;; esac
+    vendor="$(cat "/sys/block/$name/device/vendor" 2>/dev/null | tr -d ' ')"
+    model="$(cat "/sys/block/$name/device/model" 2>/dev/null | tr -d ' ')"
+    case "${vendor}${model}" in
+      *Qualcomm*MMC*|*MMCStorage*)
+        echo "$name"
+        return 0 ;;
+    esac
+    [ -z "$fallback" ] && fallback="$name"
   done
+  if [ -n "$fallback" ]; then
+    echo "$fallback"
+    return 0
+  fi
   return 1
+}
+
+# 打印候选 USB 盘信息（识别失败时用于诊断）
+list_usb_disks() {
+  local d name real vendor model
+  for d in /sys/class/block/sd*; do
+    name="$(basename "$d")"
+    case "$name" in sd[a-z]) ;; *) continue ;; esac
+    [ -e "$d/partition" ] && continue
+    real="$(readlink -f "$d/device" 2>/dev/null || true)"
+    case "$real" in *usb*) ;; *) continue ;; esac
+    vendor="$(cat "/sys/block/$name/device/vendor" 2>/dev/null | tr -s ' ')"
+    model="$(cat "/sys/block/$name/device/model" 2>/dev/null | tr -s ' ')"
+    echo "   /dev/$name  vendor=[$vendor] model=[$model]  $(( $(cat /sys/class/block/$name/size) / 2097152 ))GiB"
+  done
 }
 
 # 按 PARTLABEL 找分区名
@@ -241,10 +270,18 @@ if [ "$MODE" = "auto" ]; then
       [ $(( tick % 5 )) -eq 0 ] && echo "   等待中（$(( end - $(date +%s) ))s 剩余）"
       sleep 3
     done
-    [ -n "$DISK" ] || { echo "未找到 USB 盘：确认设备已进 Mu 并选择 mass storage，或用 --wait 延长等待"; exit 1; }
+    if [ -z "$DISK" ]; then
+      echo "未找到 USB 盘：确认设备已进 Mu 并选择 mass storage，或用 --wait 延长等待"
+      echo "当前可见的 USB 块设备（应为 Qualcomm / MMC Storage, 约 476GiB）:"
+      list_usb_disks
+      echo "USB 设备列表（mass 应为 05c6:f000）:"
+      lsusb 2>/dev/null | grep -E '05c6|Mass|Storage' || echo "   （无匹配）"
+      exit 1
+    fi
   fi
   BLOCKS="$(cat /sys/class/block/$DISK/size)"
   echo "== 目标盘 /dev/$DISK 容量 $(( BLOCKS / 2097152 ))GiB（$BLOCKS 扇区）"
+  echo "   标识 vendor=[$(cat "/sys/block/$DISK/device/vendor" 2>/dev/null | tr -s ' ')] model=[$(cat "/sys/block/$DISK/device/model" 2>/dev/null | tr -s ' ')]"
   echo "== ESP=$ESP_SIZE  根分区=$ROOT_SIZE"
   mknode "$DISK" || { echo "无法创建 /dev/$DISK"; exit 1; }
 
