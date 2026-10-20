@@ -1,4 +1,4 @@
-# crux 最小 rootfs（Xiaomi Mi 9 Pro 5G / SM8150）
+# crux rootfs（设备 crux / SM8150）
 
 主线 Linux（`7.3.0-rc5-crux73`）+ Ubuntu 26.04.1 LTS（`resolute`）aarch64 的设备适配层与构建脚本。
 

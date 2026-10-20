@@ -1,4 +1,4 @@
-crux 最小 rootfs 对应源码说明（GPL 合规）
+crux rootfs 对应源码说明（GPL 合规）
 最后更新：2026-10-20
 适用镜像：crux-rootfs-resolute-arm64-<日期>.tar.zst 及对应的 ESP 产物（Image、modules、initramfs、grub）
 

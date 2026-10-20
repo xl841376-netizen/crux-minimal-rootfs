@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================
-#  crux（Xiaomi Mi 9 Pro 5G / SM8150）完整 rootfs 打包
+#  crux（SM8150）完整 rootfs 打包
 #  产物：一个 tar.zst，解压到根分区即可开机（内核/dtb/initramfs 不放这里）
 #
 #  用法:  sudo ./mkimage.sh <输出目录> [选项]

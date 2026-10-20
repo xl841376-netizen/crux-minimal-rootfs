@@ -1,9 +1,9 @@
-crux 最小 rootfs 使用声明与免责条款
+crux rootfs 使用声明与免责条款
 最后更新：2026-10-20
 
 一、性质说明
-本系统是个人为小米 9 Pro 5G（SM8150）设备制作的非官方 Linux 移植，由个人维护，不是任何厂商的官方发行版。
-本系统与小米、Qualcomm、Canonical（Ubuntu）、GNOME 基金会均无隶属、合作或背书关系。
+本系统是个人为 crux（SM8150）设备制作的非官方 Linux 移植，由个人维护，不是任何厂商的官方发行版。
+本系统与 Qualcomm、Canonical（Ubuntu）、GNOME 基金会均无隶属、合作或背书关系。
 系统内出现的 Ubuntu、GNOME 等名称仅用于说明其来源，相关名称与商标归各自权利人所有。
 
 二、风险自负

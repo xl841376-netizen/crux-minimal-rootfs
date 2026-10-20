@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""x50-efs — IRIS/EFS access over Xiaomi private QMI service (node0 svc 65508 msg 2).
+"""x50-efs — IRIS/EFS access over vendor private QMI service (node0 svc 65508 msg 2).
 
 usage:
   x50-efs read  <path> [-o FILE]
