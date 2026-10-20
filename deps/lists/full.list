@@ -1,0 +1,35 @@
+# full —— standard + 媒体栈（gstreamer 全套会让体积从 64MB 涨到 ~945MB）
+#   ⚠️ 只是“验证视频硬解”不需要这一档：用 v4l2-ctl / mpv 就够
+#   真要装，建议只装 base + tools 两三个，而不是 plugins-good/bad 全家桶
+
+alsa-ucm-conf
+alsa-utils
+libasound2t64
+pipewire
+pipewire-pulse
+pipewire-alsa
+wireplumber
+
+network-manager
+wpasupplicant
+rfkill
+iw
+openssh-server
+
+modemmanager
+libqmi-utils
+libmbim-utils
+
+python3
+sudo
+e2fsprogs
+dosfstools
+
+# ---- 媒体（体积大头，按需）----
+gstreamer1.0-tools
+gstreamer1.0-plugins-base
+gstreamer1.0-plugins-good
+gstreamer1.0-plugins-bad
+gstreamer1.0-alsa
+gstreamer1.0-pipewire
+v4l-utils

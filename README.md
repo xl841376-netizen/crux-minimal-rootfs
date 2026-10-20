@@ -19,6 +19,36 @@
 > 要点：**L0/L1 是“任何 Ubuntu 都有的东西”，L2/L3 才是“这台机器的东西”**。
 > 换设备时只该换 L2/L3；升级系统只涉及 L0/L1。
 
+### 1.1 基础包（L1）怎么最小化集成
+
+不把 `.deb` 塞进仓库，而是给**分级清单 + 一个脚本**——仓库体积为零，装的时候一条命令。
+
+| 档 | 装什么 | 包数（含依赖） | 下载 | 安装后 |
+|---|---|---|---|---|
+| `minimal` | 音频栈（`alsa-ucm-conf` / `alsa-utils` / `libasound2t64` / `pipewire`+`-pulse`+`-alsa` / `wireplumber`） | 166 | **41.9 MB** | 161 MB |
+| **`standard`（推荐）** | minimal + 网络/SSH（`network-manager` / `wpasupplicant` / `rfkill` / `iw` / `openssh-server`）+ 基带用户态（`modemmanager` / `libqmi-utils` / `libmbim-utils`）+ `python3` / `sudo` / `e2fsprogs` / `dosfstools` | 239 | **63.9 MB** | 256 MB |
+| `full` | standard + gstreamer 媒体栈 + `v4l-utils` | 486 | **945 MB** | 1775 MB |
+
+> `full` 那约 880MB 的增量几乎全在 `gstreamer1.0-plugins-good/bad` 的编解码依赖里。
+> **只想验证视频硬解不需要它**：`v4l2-ctl` 或 `mpv` 就够，`full` 只在做播放器/转码时才装。
+
+三种用法：
+
+```bash
+# ① 在线装（推荐）：装完系统后一条命令
+sudo ./deps/install-deps.sh standard
+#    换国内镜像源：
+#    MIRROR=http://mirrors.tuna.tsinghua.edu.cn/ubuntu-ports sudo -E ./deps/install-deps.sh standard
+
+# ② 离线 deb 缓存：在有网的同架构机器上下载，再拷到目标机
+./deps/fetch-debs.sh standard        # 产物在 deps/debs/*.deb + install-offline.sh
+#    目标机执行： ./deps/debs/install-offline.sh
+
+# ③ 完全预装：把 ①② 做进自制 rootfs 归档再压（仓库不提供这种大包）
+```
+
+`deps/lists/{minimal,standard,full}.list` 就是纯包清单，改它即可定制。
+
 ---
 
 ## 2. 仓库结构
@@ -28,6 +58,7 @@
 | `overlay/` | **设备适配层 + 子系统专属用户态**，按 rootfs 绝对路径存放，直接覆盖到根即可 |
 | `modules/` | 设备专用 out-of-tree 内核模块（装到 `/usr/lib/modules/<kver>/extra/`） |
 | `build.sh` | 从 Ubuntu 最小系统重建（debootstrap → 套 overlay → 装模块 → 启用服务）。**只是备选路径**，正常装机用 §3 |
+| `deps/` | **L1 基础包的分级清单**（`lists/{minimal,standard,full}.list`）+ 在线安装脚本 + 离线 deb 打包脚本 |
 | `MANIFEST.txt` | 全部文件的路径 + sha256 |
 
 **有意排除**：任何私钥（`/root/.ssh/*`、SSH 主机密钥）、无线凭据（NM profile 里的 PSK）、`/root` 私人材料、日志、固件二进制（`/lib/firmware` 太大，装机后从设备/刷机包取）。
@@ -91,20 +122,18 @@ done
 1. **`/mnt/etc/fstab`**：`UUID=$(blkid -s UUID -o value /dev/sda38) / ext4 defaults,noatime 0 1`
 2. **ESP 上的 `EFI/crux/grub.cfg`**：`linux (…)/EFI/crux/Image74 … root=UUID=<同一个> rootwait`
 
-### ⑤ 首次开机补 L1 必备包（见 §4 的“基础包”列）
+### ⑤ 首次开机补 L1 必备包
+
+用仓库里的分级清单，一条命令（详见 §1.1）：
 
 ```bash
-sudo apt install --no-install-recommends \
-  network-manager wpasupplicant rfkill iw modemmanager libqmi-utils libmbim-utils \
-  alsa-ucm-conf alsa-utils libasound2t64 \
-  pipewire pipewire-pulse pipewire-alsa wireplumber \
-  gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
-  gstreamer1.0-plugins-bad gstreamer1.0-alsa gstreamer1.0-pipewire \
-  openssh-server sudo python3 v4l-utils
+cd crux-minimal-rootfs
+sudo ./deps/install-deps.sh standard     # 音频+网络/SSH+基带用户态，约 64MB 下载
+# MIRROR=http://mirrors.tuna.tsinghua.edu.cn/ubuntu-ports sudo -E ./deps/install-deps.sh standard
 ```
 
-再把 `/lib/firmware` 补齐（`qcom/sm8150/xiaomi/crux/*.mbn`、`qcom/sdx50m/*`、`ath10k/WCN3990/hw1.0/*`、`regulatory.db`），
-来源是设备原厂分区或官方刷机包。
+再把 `/lib/firmware` 补齐（`qcom/sm8150/xiaomi/crux/*.mbn`、`ath10k/WCN3990/hw1.0/*`、
+`qcom/sdx50m/*`、`regulatory.db`），来源是设备原厂分区或官方刷机包。
 
 ---
 

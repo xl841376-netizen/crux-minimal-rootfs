@@ -1,0 +1,29 @@
+# standard —— 推荐档（≈64MB 下载 / 256MB 安装后，含依赖 239 包）
+# 音频 + 网络/SSH + 基带用户态，够日常用
+
+# ---- 音频 ----
+alsa-ucm-conf
+alsa-utils
+libasound2t64
+pipewire
+pipewire-pulse
+pipewire-alsa
+wireplumber
+
+# ---- 网络 / 远程 ----
+network-manager
+wpasupplicant
+rfkill
+iw
+openssh-server
+
+# ---- 基带用户态（配合 rmtfs/tqftpserv/pd-mapper）----
+modemmanager
+libqmi-utils
+libmbim-utils
+
+# ---- 基础工具 ----
+python3
+sudo
+e2fsprogs
+dosfstools

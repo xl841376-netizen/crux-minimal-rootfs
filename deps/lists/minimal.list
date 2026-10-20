@@ -1,0 +1,18 @@
+# minimal —— 系统能起、音频能出声（≈42MB 下载 / 161MB 安装后，含依赖 166 包）
+# 用途：只想验证"能开机 + 扬声器/听筒有声音"
+
+# 音频栈
+alsa-ucm-conf
+alsa-utils
+libasound2t64
+pipewire
+pipewire-pulse
+pipewire-alsa
+wireplumber
+
+# 系统骨架（debootstrap base 之后一般已自带的就跳过）
+systemd
+systemd-sysv
+udev
+kmod
+dbus
