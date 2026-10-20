@@ -85,10 +85,15 @@ sudo ./deps/install-deps.sh standard
 
 **Release 页面**下载两个文件：
 
+当前最新（**v2026.10.20-1 修补版**，2026-10-20）：
+
 | 文件 | 说明 |
 |---|---|
-| `crux-rootfs-resolute-arm64-YYYYMMDD.tar.zst` | 约 362 MB，解压后约 1.2 GB |
-| `SHA256SUMS` | 校验用 |
+| `crux-rootfs-resolute-arm64-20261020-fix2.tar.zst` | 298 MB（解压后约 1.2 GB），sha256 `54085db2…747ce3b` |
+| `SHA256SUMS.fix2` | 校验用 |
+
+> v2026.10.20-1 相对 v2026.10.20 修了 4 处：补 `qsee-supplicant`/`qsee-app-loader` 两个二进制、
+> swap 改全参数化默认全关、ssh 首次启动自动生成 host key、模块路径归一（`extra/` 清空）。
 
 包里已经含：Ubuntu 26.04.1 基础系统 + L1 `standard` 全套包 + 本仓库 overlay（167 个文件）
 + 内核模块 `7.3.0-rc5-crux73` + 固件（`qcom/sm8150/xiaomi/crux`、`ath10k/WCN3990`、`qcom/sdx50m` 等 1184 个文件）
@@ -101,7 +106,7 @@ sudo mkfs.ext4 -L linux-root26 /dev/sda38      # 分区号以 sgdisk 输出为�
 
 # ② 解压 = 写系统（这就是全部）
 sudo mount /dev/sda38 /mnt
-sudo tar --zstd -xpf crux-rootfs-resolute-arm64-20261020.tar.zst -C /mnt
+sudo tar --zstd -xpf crux-rootfs-resolute-arm64-20261020-fix2.tar.zst -C /mnt
 sudo sync && sudo umount /mnt
 
 # ③ 让 grub 指向这个分区
