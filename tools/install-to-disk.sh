@@ -8,7 +8,7 @@ MODE="auto"
 TAR=""; ROOTDEV=""; ESPDEV=""; EFI=""; KERNEL=""; DTB=""; INITRD=""
 MU=""; LABEL="linux-root"; ROOT_SIZE="24G"; ESP_SIZE="512M"
 MKFS=0; FLASH_MU=1; WAIT_SEC=180; DISK_ARG=""
-FROM_USERDATA=""; APPLY=0; DRY_RUN=0; DO_REBOOT=1; LAYOUT_ONLY=0
+FROM_USERDATA=""; APPLY=0; DRY_RUN=0; DO_REBOOT=1; LAYOUT_ONLY=0; PLAN_ONLY=0
 ROOTMN=/mnt/cruxroot; ESPMN=/mnt/cruxesp
 
 usage() {
@@ -34,6 +34,7 @@ usage() {
   --disk          指定盘（如 /dev/loop48），跳过 USB 识别
   --from-userdata 从 userdata 尾部释放空间，例 40G（盘上无其他空闲时使用）
   --layout        只打印目标盘分区表，不改动任何内容
+  --plan          只打印将要执行的动作（分区/格式化/写入），不改动任何内容
   --apply         真正执行 userdata 缩容（不带则只打印计划）
   --no-reboot     刷完 Mu 不自动重启
 EOM
@@ -61,12 +62,13 @@ while [ $# -gt 0 ]; do
     --no-reboot) DO_REBOOT=0; shift ;;
     --mkfs) MKFS=1; shift ;;
     --layout) LAYOUT_ONLY=1; shift ;;
+    --plan) PLAN_ONLY=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "未知参数: $1"; usage; exit 1 ;;
   esac
 done
 
-if [ "$LAYOUT_ONLY" != "1" ]; then
+if [ "$LAYOUT_ONLY" != "1" ] && [ "$PLAN_ONLY" != "1" ]; then
   for v in TAR EFI KERNEL DTB; do
     [ -n "${!v}" ] || { echo "缺少参数: $v"; usage; exit 1; }
   done
@@ -273,7 +275,7 @@ shrink_userdata() {
 }
 
 # 1. fastboot 阶段：刷 Mu 固件 → 重启 → 进 Mu 界面切 mass
-if [ "$MODE" = "auto" ] && [ "$FLASH_MU" = "1" ] && [ -n "$MU" ]; then
+if [ "$MODE" = "auto" ] && [ "$FLASH_MU" = "1" ] && [ -n "$MU" ] && [ -z "$DISK_ARG" ]; then
   if fastboot devices 2>/dev/null | grep -q .; then
     echo "== 阶段 1/3 fastboot：flash boot $MU"
     fastboot flash boot "$MU"
@@ -350,6 +352,49 @@ if [ "$MODE" = "auto" ]; then
     show_layout "$DISK"
     exit 0
   fi
+
+# --plan：只读预览将要做的事
+if [ "$PLAN_ONLY" = "1" ]; then
+  if [ -n "$DISK_ARG" ]; then
+    DISK="$(basename "$DISK_ARG")"
+  else
+    DISK=""
+    for c in $(find_usb_disks || true); do
+      if probe_disk "$c"; then DISK="$c"; echo "== 识别到目标设备 /dev/$c：$PROBE_WHY"; break; fi
+    done
+  fi
+  if [ -z "$DISK" ]; then
+    echo "未找到目标盘。当前可见的 USB 块设备:"
+    list_usb_disks
+    exit 1
+  fi
+  mknode "$DISK" || { echo "无法创建 /dev/$DISK"; exit 1; }
+  echo "== 计划（只读，不写盘）"
+  echo "   目标盘     /dev/$DISK  $(( $(cat /sys/class/block/$DISK/size) / 2097152 ))GiB  $(( $(cat /sys/class/block/$DISK/size) )) 扇区"
+  echo "   标识       vendor=[$(cat "/sys/block/$DISK/device/vendor" 2>/dev/null | tr -s ' ')] model=[$(cat "/sys/block/$DISK/device/model" 2>/dev/null | tr -s ' ')]"
+  ESPNAME="$(find_part "$DISK" efi || true)"
+  ROOTNAME="$(find_part "$DISK" "$LABEL" || true)"
+  UDNAME="$(find_part "$DISK" userdata || true)"
+  for pair in "efi:$ESPNAME" "$LABEL:$ROOTNAME" "userdata:$UDNAME"; do
+    nm="${pair%%:*}"; pn="${pair#*:}"
+    if [ -n "$pn" ]; then
+      sz="$(cat /sys/class/block/$pn/size 2>/dev/null || echo 0)"
+      mb=$(( sz / 2048 ))
+      if [ "$mb" -ge 1024 ]; then human="$(( mb / 1024 ))GiB"; else human="${mb}MiB"; fi
+      echo "   $(printf '%-11s' "$nm")$pn  $human"
+    else
+      echo "   $(printf '%-11s' "$nm")不存在"
+    fi
+  done
+  [ -n "$FROM_USERDATA" ] && echo "   将从 userdata 尾部释放 $FROM_USERDATA"
+  echo "   $(sgdisk -p "/dev/$DISK" 2>/dev/null | grep -E '^Total free space')"
+  echo "   分区表:"
+  sgdisk -p "/dev/$DISK" 2>/dev/null | awk '/^Number/{f=1} f' | sed -E 's/^/     /' 
+  echo "   动作       解压 $(basename "$TAR") → 根分区；写 ESP（$(basename "$EFI") / $(basename "$KERNEL") / $(basename "$DTB")${INITRD:+ / $(basename "$INITRD")}）；生成 EFI/crux/grub.cfg"
+  if [ -n "${MU:-}" ] && [ -z "$DISK_ARG" ]; then echo "   阶段1      fastboot flash boot $(basename "$MU")"; fi
+  [ -n "$FROM_USERDATA" ] && echo "   注意       需要 --apply 才会真正缩 userdata 并建分区"
+  exit 0
+fi
 
   echo "== 阶段 3/3 分区与写入"
 
