@@ -1,0 +1,8 @@
+ACTION!="add|change|move|bind", GOTO="mm_x50_fusion_end"
+# wwan 口（DIAG/MBIM/QMI）统一归到 qcom-soc，让 QRTR 控制面与 mhi_net 数据面合成一个 MM 设备
+SUBSYSTEM=="wwan", ATTRS{vendor}=="0x17cb", ATTRS{device}=="0x0305", ENV{ID_MM_QCOM_SOC}="1", ENV{ID_MM_PHYSDEV_UID}="qcom-soc"
+# raw MHI QMI 口不应答（控制面走 QRTR over IPCR），别让 MM 白等 45s
+SUBSYSTEM=="wwan", KERNEL=="*qmi*", ATTRS{vendor}=="0x17cb", ATTRS{device}=="0x0305", ENV{ID_MM_PORT_IGNORE}="1"
+SUBSYSTEM=="net", KERNEL=="mhi_hwip*", ENV{ID_MM_CANDIDATE}="1", ENV{ID_MM_QCOM_SOC}="1", ENV{ID_MM_PHYSDEV_UID}="qcom-soc"
+SUBSYSTEM=="net", KERNEL=="mhi_swip*", ENV{ID_MM_CANDIDATE}="1", ENV{ID_MM_QCOM_SOC}="1", ENV{ID_MM_PHYSDEV_UID}="qcom-soc"
+LABEL="mm_x50_fusion_end"

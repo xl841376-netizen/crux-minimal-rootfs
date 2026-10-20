@@ -1,0 +1,183 @@
+#!/usr/bin/env python3
+# x50-uim-prepare: 冷启动后把 SIM 推到可用状态，并把模组抬到 online
+#
+# 已验证有效的顺序（2026-10-19 实测）：
+#   1) UIM Switch Slot(0x0046) logical1 -> physical2   （crux 槽1 硬件损坏，卡在槽2）
+#   2) UIM Change Provisioning Session(0x0038) slot=1 activate=1 + USIM AID  -> app state 7
+#   3) UIM Power Off SIM(0x0030) / Power On SIM(0x0031) slot=1   <-- 关键：让 modem 内部
+#      UIM/DMS 状态机重新初始化，否则 DMS 0x002E 会一直返回 error=60 device_not_ready
+#   4) DMS Set Operating Mode(0x002E)=1 (online)
+# 幂等：已经 app=7 且 mode=online 时整体跳过
+import json, os, time
+
+CMD = "/run/x50-l4.cmd"
+STATE = "/run/x50-l4.json"
+LOG = "/var/log/x50-uim-prepare.log"
+
+SVC_UIM = 11
+SVC_DMS = 2
+AID = "a0000000871002ff86ffff89ffffffff"
+MSG_SWITCH = 0x0046
+MSG_PROV = 0x0038
+MSG_PWR_OFF = 0x0030
+MSG_PWR_ON = 0x0031
+MSG_SET_MODE = 0x002E
+MSG_GET_MODE = 0x002D
+
+
+def fmt(r):
+    return "None" if not r else "(%s, %s)" % (r.get("result"), r.get("error"))
+
+
+def log(msg):
+    line = "%s %s" % (time.strftime("%F %T"), msg)
+    try:
+        with open(LOG, "a") as f:
+            f.write(line + "\n")
+    except OSError:
+        pass
+    print(line, flush=True)
+
+
+def state():
+    for _ in range(12):
+        try:
+            with open(STATE) as f:
+                return json.load(f)
+        except Exception:
+            time.sleep(0.25)
+    return None
+
+
+def services():
+    st = state() or {}
+    return st.get("services") or {}
+
+
+def wait_l4(limit=420):
+    t0 = time.time()
+    while time.time() - t0 < limit:
+        svc = services()
+        if (svc.get("uim") or {}).get("ok"):
+            return True
+        time.sleep(3)
+    return False
+
+
+def card_apps():
+    svc = services()
+    cards = ((svc.get("uim") or {}).get("cards") or {}).get("cards") or []
+    return [(c.get("state_name"), [a.get("state") for a in (c.get("apps") or [])]) for c in cards]
+
+
+def has_error_slot():
+    return any(n == "error" for n, _ in card_apps())
+
+
+def app_ready():
+    return any(7 in apps for _, apps in card_apps())
+
+
+def send(payload, msg, wait=45.0):
+    """写 cmd 文件，等待该 svc/msg 的 cmd_result"""
+    base = len((state() or {}).get("cmd_results") or [])
+    try:
+        if os.path.exists(CMD):
+            os.remove(CMD)
+    except OSError:
+        pass
+    with open(CMD, "w") as f:
+        f.write(payload)
+    t0 = time.time()
+    while time.time() - t0 < wait:
+        cr = (state() or {}).get("cmd_results") or []
+        if len(cr) > base:
+            for r in cr[base:]:
+                if r.get("msg") == msg:
+                    return r
+        time.sleep(0.25)
+    return None
+
+
+def op_mode():
+    r = send("%d %04X" % (SVC_DMS, MSG_GET_MODE), MSG_GET_MODE, wait=25)
+    if not r or r.get("result") != 0:
+        return None
+    for tlv in (r.get("tlvs") or []):
+        if tlv and tlv[0] == 1:
+            v = str(tlv[1])
+            return int(v[:2], 16) if len(v) >= 2 else None
+    return None
+
+
+def main():
+    log("=== x50-uim-prepare start ===")
+    if not wait_l4():
+        log("[fatal] L4/uim not ready")
+        return 2
+
+    cards = card_apps()
+    log("[cards] %s" % (cards,))
+    ready = app_ready()
+    mode = op_mode()
+    log("[state] app_ready=%s mode=%s" % (ready, mode))
+
+    if ready and mode == 1:
+        log("[skip] card READY and modem already online")
+        return 0
+
+    # 1) 槽映射：出现 error 槽（坏槽 no_atr）时做 logical1 -> physical2
+    if has_error_slot() or not ready:
+        r = send("%d %04X 0101000102040002000000" % (SVC_UIM, MSG_SWITCH), MSG_SWITCH, wait=40)
+        log("[switch] %s" % (fmt(r)))
+        time.sleep(5)
+
+    # 2) provisioning：把 USIM 应用拉到 state 7
+    if not app_ready():
+        for attempt in (1, 2):
+            r = send("%d %04X 01020000011012000110%s" % (SVC_UIM, MSG_PROV, AID), MSG_PROV, wait=40)
+            log("[prov #%d] %s" % (attempt, fmt(r)))
+            for _ in range(6):
+                time.sleep(2)
+                if app_ready():
+                    break
+            if app_ready():
+                break
+    log("[after prov] cards=%s" % (card_apps(),))
+
+    # 3) 卡电源循环（关键步骤）
+    r = send("%d %04X 01010001" % (SVC_UIM, MSG_PWR_OFF), MSG_PWR_OFF, wait=40)
+    log("[power off] %s" % (fmt(r)))
+    time.sleep(4)
+    r = send("%d %04X 01010001" % (SVC_UIM, MSG_PWR_ON), MSG_PWR_ON, wait=40)
+    log("[power on] %s" % (fmt(r)))
+    for _ in range(8):
+        time.sleep(2.5)
+        if app_ready():
+            break
+    if not app_ready():
+        log("[warn] app not ready after power cycle, re-provision")
+        r = send("%d %04X 01020000011012000110%s" % (SVC_UIM, MSG_PROV, AID), MSG_PROV, wait=40)
+        log("[prov retry] %s" % (fmt(r)))
+        time.sleep(6)
+    log("[after power cycle] cards=%s" % (card_apps(),))
+
+    # 4) 抬起
+    mode = op_mode()
+    if mode == 1:
+        log("[skip] already online")
+        return 0
+    r = send("%d %04X 01010001" % (SVC_DMS, MSG_SET_MODE), MSG_SET_MODE, wait=60)
+    log("[online] %s" % (fmt(r)))
+    time.sleep(5)
+    mode = op_mode()
+    log("[verify] mode=%s app_ready=%s" % (mode, app_ready()))
+    if mode == 1:
+        log("[done] modem online")
+        return 0
+    log("[fail] modem not online")
+    return 3
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

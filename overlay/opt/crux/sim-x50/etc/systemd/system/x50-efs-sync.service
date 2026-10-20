@@ -1,0 +1,12 @@
+[Unit]
+Description=X50 EFS sync (persistent responder, 8KB chunks for our mhi_userchan)
+After=local-fs.target
+[Service]
+Type=simple
+Environment=PYTHONUNBUFFERED=1
+ExecStartPre=/usr/local/sbin/x50-efs-seed.sh
+ExecStart=/usr/local/sbin/x50-modem-loader --dev /dev/mhi_pipe_10 --hello-mode 2 --persist --chunk-size 8192 --read-size 8192 --mem-dump-dir /var/lib/x50-modem/efsraw --mem-prefix mdm1 --reopen-delay 2
+Restart=always
+RestartSec=3
+[Install]
+WantedBy=multi-user.target

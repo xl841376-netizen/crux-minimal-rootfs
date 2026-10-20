@@ -1,0 +1,20 @@
+#!/bin/sh
+# crux-modem-ready —— 基带就绪门控，供 systemd 的 ExecCondition 使用
+#
+# 返回 0 = 允许启动；返回非 0 = 这次跳过（systemd 记为 condition failed，
+# 不报失败、不影响后续 start）。
+#
+# 判据：X50 必须已经进入 MISSION MODE —— 以 mhi0_IP_HW_OFFLOAD_0 设备
+# 出现为准（该设备只在 mission mode 下由 MHI 总线创建）。如果 debugfs
+# 可读，再交叉确认一次不在 SBL。
+
+DEV=/sys/bus/mhi/devices/mhi0_IP_HW_OFFLOAD_0
+ST=/sys/kernel/debug/mhi/mhi0/states
+
+[ -e "$DEV" ] || exit 1
+
+if [ -r "$ST" ]; then
+	grep -q "MISSION MODE" "$ST" || exit 1
+fi
+
+exit 0

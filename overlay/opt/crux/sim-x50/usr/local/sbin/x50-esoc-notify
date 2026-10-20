@@ -1,0 +1,15 @@
+#!/usr/bin/env python3
+# [crux] 向 crux-esoc 发 ESOC_NOTIFY（对齐原厂 esoc_ctrl.h）
+#  1 = ESOC_IMG_XFER_DONE   镜像已灌完
+#  2 = ESOC_BOOT_DONE       模组已进任务模式
+# 内核侧在收到时会对 X50 做 PCIe D3hot -> D0 + 链路重训（原厂 mhi_arch_esoc_ops_power_on 的等价动作）。
+import fcntl, os, struct, sys
+
+NOTIFY = 0x4004CC03
+v = int(sys.argv[1]) if len(sys.argv) > 1 else 2
+fd = os.open("/dev/crux-esoc", os.O_RDWR)
+try:
+    fcntl.ioctl(fd, NOTIFY, bytearray(struct.pack("I", v)), True)
+finally:
+    os.close(fd)
+print("esoc notify %d ok" % v)

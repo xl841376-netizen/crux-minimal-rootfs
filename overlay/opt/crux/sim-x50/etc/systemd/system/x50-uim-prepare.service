@@ -1,0 +1,14 @@
+[Unit]
+Description=X50 UIM prepare (logical slot 1 -> physical slot 2, provisioning session activate)
+After=x50-qmi-l4.service
+Wants=x50-qmi-l4.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/x50-uim-prepare
+RemainAfterExit=yes
+TimeoutStartSec=600
+Nice=10
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,387 @@
+#!/usr/bin/env python3
+# x50-qmi-l4: crux X50 (SDX50M) L4 QMI 会话层 v2
+#  1) 服务端口从 modem-mgr list 取（不自行广播 NS，避免 qrtr_bcast_enqueue 卡死）
+#  2) 裸 QMI 直发服务端口，不需要 QMI_CTL AllocateCID
+#  3) 每个服务一条长驻 socket：既能发请求，也能收 indication（flags & 0x04）
+#  4) DMS SET_EVENT_REPORT 注册 operating-mode / uim-state 上报
+import json, os, random, select, socket, struct, subprocess, sys, time, traceback
+
+AF_QIPCRTR = 42
+LOCAL_NODE = 1
+MODEM_MGR = "/usr/local/sbin/modem-mgr"
+STATE_FILE = "/run/x50-l4.json"
+CMD_FILE = "/run/x50-l4.cmd"      # echo "svc msg_hex [tlv_hex]" > 此文件，由 daemon 用长驻 socket 发出
+LOG = "/var/log/x50-l4.log"
+
+DMS_SET_EVENT = 0x0001
+DMS_CAPS = 0x0020
+NAS_SERVING = 0x0024
+WDS_PKT_STATUS = 0x0022
+UIM_CARD_STATUS = 0x002F
+QUERY = {"dms": DMS_CAPS, "nas": NAS_SERVING, "wds": WDS_PKT_STATUS, "uim": UIM_CARD_STATUS, "pdc": 0x0022, "pbm": 0x0003}
+
+# DMS SetEventReport: TLV 0x13 operating-mode=1, 0x14 uim-state=1
+REG = {
+    "dms": (0x0001, "1301000114010001"),         # Set Event Report: operating-mode / uim-state
+    "nas": (0x0003, "13010001190100011a010001"),  # Register Indications: serving system / signal info / error rate
+    "wds": (0x0003, "1201000119010001"),         # Indication Register: ext ip config change / profile changes
+    "pbm": (0x0001, "010400ff000000"),
+    "uim": (0x002E, "0104000f000000"),           # Register Events: mask=0x0F (low 4 bits)
+}
+REG_INTERVAL = 60.0    # 注册是 client/socket 绑定，长驻 socket 也周期续注册，防被清
+
+
+def log(m):
+    line = "%s %s" % (time.strftime("%F %T"), m)
+    try:
+        with open(LOG, "a") as f:
+            f.write(line + "\n")
+    except OSError:
+        pass
+
+
+def get_ports(node=0):
+    res = {}
+    try:
+        p = subprocess.run([MODEM_MGR, "list", "--node", str(node)],
+                           capture_output=True, text=True, timeout=12)
+    except Exception as e:
+        log("[ports] modem-mgr list failed: %s: %s" % (type(e).__name__, e))
+        return res
+    for ln in p.stdout.splitlines():
+        f = ln.split()
+        if len(f) < 5 or not f[1].startswith("svc") or not f[4].startswith("port"):
+            continue
+        try:
+            res[int(f[1][3:])] = int(f[4][4:])
+        except ValueError:
+            continue
+    return res
+
+
+def parse_tlvs(d):
+    tlvs, p = [], 7
+    while p + 3 <= len(d):
+        tt, tl = struct.unpack("<BH", d[p:p + 3])
+        p += 3
+        if p + tl > len(d):
+            break
+        tlvs.append((tt, d[p:p + tl]))
+        p += tl
+    return tlvs
+
+
+def result_of(tlvs):
+    for t, v in tlvs:
+        if t == 0x02 and len(v) >= 4:
+            return struct.unpack("<HH", v[:4])
+    return (None, None)
+
+
+CARD_STATE = {0: "absent", 1: "present", 2: "error"}
+
+
+def parse_card_status(tlvs):
+    """TLV 0x10 (UIM Card Status) → {indexes, cards[{state,pin_state,error,apps}]}
+    结构来源：libqmi 1.38 data/qmi-service-uim.json 'Card Status' TLV 0x10
+      4x guint16 indexes -> guint8 card_count -> per card:
+        state, upin_state, upin_retries, upuk_retries, error_code, app_count
+        per app: type, state, perso_state, perso_feature, perso_retries,
+                 perso_unblock_retries, aid(len+bytes),
+                 upin_replaces_pin1, pin1_state, pin1_retries, puk1_retries,
+                 pin2_state, pin2_retries, puk2_retries"""
+    raw = None
+    for t, v in tlvs:
+        if t == 0x10:
+            raw = bytes.fromhex(v) if isinstance(v, str) else v
+    if not raw or len(raw) < 9:
+        return None
+    try:
+        b = raw
+        idx = [int.from_bytes(b[2 * i:2 * i + 2], "little") for i in range(4)]
+        p = 8
+        cnt = b[p]; p += 1
+        cards = []
+        for _ in range(cnt):
+            st, upin, _r1, _r2, err = b[p], b[p + 1], b[p + 2], b[p + 3], b[p + 4]
+            p += 5
+            napp = b[p]; p += 1
+            apps = []
+            for _a in range(napp):
+                at, as_, ps, pf, _pr, _pur = b[p:p + 6]; p += 6
+                al = b[p]; p += 1
+                aid = b[p:p + al].hex(); p += al
+                _upinr, p1s, p1r, _pk1, p2s, p2r, _pk2 = b[p:p + 7]; p += 7
+                apps.append({"type": at, "state": as_, "perso_state": ps,
+                             "perso_feature": pf, "aid": aid,
+                             "pin1": [p1s, p1r], "pin2": [p2s, p2r]})
+            cards.append({"state": st, "state_name": CARD_STATE.get(st, "?"),
+                          "pin_state": upin, "error": err, "apps": apps})
+        return {"indexes": ["0x%04x" % x for x in idx], "cards": cards,
+                "consumed": p, "len": len(b)}
+    except IndexError:
+        return None
+
+
+class Conn:
+    def __init__(self, name, service, port):
+        self.name = name
+        self.service = service
+        self.port = port
+        self.sock = socket.socket(AF_QIPCRTR, socket.SOCK_DGRAM, 0)
+        self.sock.bind((LOCAL_NODE, 0))
+        self.sock.setblocking(False)
+        self.txn = random.randint(1, 0xFFFF)
+        self.pending = {}
+        self.ind_count = 0
+        self.last_ind = None
+
+    def send(self, msg, tlv=b"", timeout=4.0, cmd=False):
+        self.txn = (self.txn + 1) & 0xFFFF or 1
+        txn = self.txn
+        self.pending[txn] = {"msg": msg, "deadline": time.time() + timeout,
+                             "done": False, "cmd": cmd}
+        frame = struct.pack("<BHHH", 0, txn, msg, len(tlv)) + tlv
+        try:
+            self.sock.sendto(frame, (0, self.port))
+        except OSError as e:
+            log("[%s] sendto failed: %s: %s" % (self.name, type(e).__name__, e))
+            self.pending.pop(txn, None)
+            return None
+        return txn
+
+    def expire(self):
+        now = time.time()
+        for txn, p in list(self.pending.items()):
+            if not p["done"] and now > p["deadline"]:
+                p["done"] = True
+                p["res"] = {"ok": False, "error": "timeout", "service": self.service}
+                log("[%s] msg 0x%04x timeout" % (self.name, p["msg"]))
+
+    def take_results(self):
+        out = []
+        for txn, p in list(self.pending.items()):
+            if p["done"]:
+                out.append(p["res"])
+                del self.pending[txn]
+        return out
+
+
+def new_conns():
+    ports = get_ports(0)
+    conns = {}
+    for name, svc in (("dms", 2), ("nas", 3), ("wds", 1), ("uim", 11), ("pdc", 36), ("pbm", 12)):
+        if svc in ports:
+            try:
+                conns[name] = Conn(name, svc, ports[svc])
+            except OSError as e:
+                log("[%s] bind failed: %s: %s" % (name, type(e).__name__, e))
+    return conns, ports
+
+
+def run(interval=5.0):
+    log("[daemon] start v2 interval=%.1fs" % interval)
+    conns, ports = new_conns()
+    log("[daemon] services=%s" % ",".join(sorted(conns)))
+    for name, (msg, tlv) in REG.items():
+        if name in conns:
+            t = conns[name].send(msg, bytes.fromhex(tlv), 6.0)
+            log("[%s] register msg=0x%04x (txn=%s)" % (name, msg, t))
+    next_reg = time.time() + REG_INTERVAL
+    latest = {}
+    inds = []
+    cmd_results = []
+    next_q = 0.0
+    while True:
+        now = time.time()
+        try:
+            if os.path.exists(CMD_FILE):
+                with open(CMD_FILE) as f:
+                    parts = f.read().split()
+                os.remove(CMD_FILE)
+                if len(parts) >= 2:
+                    svc = int(parts[0])
+                    msg = int(parts[1], 16)
+                    tlv = bytes.fromhex(parts[2]) if len(parts) > 2 else b""
+                    hit = [c for c in conns.values() if c.service == svc]
+                    if hit:
+                        # 超时对齐原厂 qcril_qmi_nas_set_operating_mode_state：74s
+                        t = hit[0].send(msg, tlv, 74.0, cmd=True)
+                        log("[cmd] %s svc=%d msg=0x%04x txn=%s" % (hit[0].name, svc, msg, t))
+                    else:
+                        log("[cmd] no connection for svc=%d" % svc)
+        except Exception as e:
+            log("[cmd] error: %s: %s" % (type(e).__name__, e))
+        if now >= next_reg:
+            for name, (msg, tlv) in REG.items():
+                if name in conns:
+                    conns[name].send(msg, bytes.fromhex(tlv), 6.0)
+            next_reg = now + REG_INTERVAL
+            log("[reg] renew all")
+        if now >= next_q:
+            for name, c in conns.items():
+                msg = QUERY[name]
+                c.send(msg, b"", 4.0)
+            next_q = now + interval
+        try:
+            r, _, _ = select.select([c.sock for c in conns.values()], [], [], 0.5)
+        except Exception as e:
+            log("[daemon] select error: %s: %s" % (type(e).__name__, e))
+            time.sleep(1)
+            continue
+        for sock in r:
+            name = next(n for n, c in conns.items() if c.sock is sock)
+            c = conns[name]
+            for _ in range(32):
+                try:
+                    d, _a = sock.recvfrom(65536)
+                except OSError:
+                    break
+                if len(d) < 7:
+                    continue
+                flags, txn, msg, _tl = struct.unpack("<BHHH", d[:7])
+                if flags & 0x04:
+                    c.ind_count += 1
+                    tlvs = parse_tlvs(d)
+                    ent = {"ts": int(time.time()), "service": name, "msg": msg,
+                           "tlvs": [[t, v.hex()] for t, v in tlvs], "raw": d.hex()}
+                    c.last_ind = ent
+                    inds.append(ent)
+                    del inds[:-20]
+                    log("[IND] %s msg=0x%04x tlv=%s" %
+                        (name, msg, ",".join("%02x:%s" % (t, v.hex()) for t, v in tlvs)))
+                    continue
+                p = c.pending.get(txn)
+                if not p:
+                    continue
+                tlvs = parse_tlvs(d)
+                res, err = result_of(tlvs)
+                p["done"] = True
+                p["res"] = {"ok": True, "service": name, "msg": msg, "result": res, "error": err,
+                            "cmd": p.get("cmd", False),
+                            "tlvs": [[t, v.hex()] for t, v in tlvs], "raw": d.hex(),
+                            "ts": int(time.time())}
+        for c in conns.values():
+            c.expire()
+            for res in c.take_results():
+                if res.get("cmd"):
+                    cmd_results.append(res)
+                    del cmd_results[:-24]
+                    log("[cmdres] %s msg=0x%04x result=%s error=%s" %
+                        (c.name, res.get("msg", 0), res.get("result"), res.get("error")))
+                if c.name == "uim" and res.get("ok"):
+                    res["cards"] = parse_card_status(res.get("tlvs", []))
+                if res.get("msg") == REG.get(c.name, (None,))[0] and res.get("result") == 0:
+                    log("[%s] register msg=0x%04x ok" % (c.name, res.get("msg")))
+                    continue
+                prev = latest.get(c.name)
+                latest[c.name] = res
+                if not prev or (prev.get("result"), prev.get("error"), prev.get("tlvs")) != \
+                        (res.get("result"), res.get("error"), res.get("tlvs")):
+                    log("[l4] %s result=%s error=%s msg=0x%04x" %
+                        (c.name, res.get("result"), res.get("error"), res.get("msg", 0)))
+                    if c.name == "uim" and res.get("cards"):
+                        log("[uim] " + ",".join("%s(apps=%d)" % (x["state_name"], len(x["apps"]))
+                                                for x in res["cards"]["cards"]))
+        try:
+            tmp = STATE_FILE + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump({"ts": int(time.time()), "ports": ports,
+                           "services": latest,
+                           "cmd_results": [{"svc": r.get("service"), "msg": r.get("msg"),
+                                            "result": r.get("result"), "error": r.get("error"),
+                                            "tlvs": r.get("tlvs"), "ts": r.get("ts")}
+                                           for r in cmd_results],
+                           "indications": inds,
+                           "ind_counts": {n: c.ind_count for n, c in conns.items()}},
+                          f, ensure_ascii=False)
+            os.replace(tmp, STATE_FILE)
+        except OSError as e:
+            log("[state] write failed: %s" % e)
+
+
+def snapshot_once():
+    conns, ports = new_conns()
+    res = {"ts": int(time.time()), "ports": ports, "services": {}}
+    if "dms" in conns:
+        conns["dms"].send(DMS_CAPS, b"", 4.0)
+    if "nas" in conns:
+        conns["nas"].send(NAS_SERVING, b"", 4.0)
+    if "wds" in conns:
+        conns["wds"].send(WDS_PKT_STATUS, b"", 4.0)
+    if "uim" in conns:
+        conns["uim"].send(UIM_CARD_STATUS, b"", 4.0)
+    end = time.time() + 6
+    got = 0
+    while time.time() < end and got < len(conns):
+        r, _, _ = select.select([c.sock for c in conns.values()], [], [], 0.4)
+        for sock in r:
+            name = next(n for n, c in conns.items() if c.sock is sock)
+            try:
+                d, _ = sock.recvfrom(65536)
+            except OSError:
+                continue
+            flags, txn, msg, _ = struct.unpack("<BHHH", d[:7])
+            if flags & 0x04:
+                continue
+            tlvs = parse_tlvs(d)
+            res_, err = result_of(tlvs)
+            res["services"][name] = {"ok": True, "msg": msg, "result": res_, "error": err,
+                                     "tlvs": [[t, v.hex()] for t, v in tlvs]}
+            got += 1
+    for c in conns.values():
+        c.sock.close()
+    return res
+
+
+def main(argv):
+    cmd = argv[1] if len(argv) > 1 else "status"
+    if cmd == "status":
+        d = snapshot_once()
+        print(json.dumps(d, indent=2, ensure_ascii=False))
+        return 0
+    if cmd == "daemon":
+        interval = float(argv[2]) if len(argv) > 2 else 5.0
+        try:
+            run(interval)
+        except Exception as e:
+            log("[daemon] fatal: %s: %s\n%s" % (type(e).__name__, e, traceback.format_exc()))
+            raise
+        return 0
+    if cmd == "call":
+        if len(argv) < 4:
+            print("usage: x50-qmi-l4 call <service> <msg_hex> [tlv_hex] [timeout]")
+            return 1
+        svc = int(argv[2]); msg = int(argv[3], 16)
+        tlv = bytes.fromhex(argv[4]) if len(argv) > 4 and argv[4] else b""
+        to = float(argv[5]) if len(argv) > 5 else 6.0
+        ports = get_ports(0)
+        if svc not in ports:
+            print("service %d not advertised" % svc)
+            return 2
+        c = Conn("svc%d" % svc, svc, ports[svc])
+        c.send(msg, tlv, to)
+        end = time.time() + to + 1
+        out = None
+        while time.time() < end and out is None:
+            r, _, _ = select.select([c.sock], [], [], 0.3)
+            if not r:
+                continue
+            d, _ = c.sock.recvfrom(65536)
+            flags, txn, rmsg, _ = struct.unpack("<BHHH", d[:7])
+            if flags & 0x04:
+                print("IND", d.hex())
+                continue
+            tlvs = parse_tlvs(d)
+            res, err = result_of(tlvs)
+            out = {"ok": True, "msg": rmsg, "result": res, "error": err,
+                   "tlvs": [[t, v.hex()] for t, v in tlvs], "raw": d.hex()}
+        c.sock.close()
+        print(json.dumps(out or {"ok": False, "error": "timeout"}, indent=2, ensure_ascii=False))
+        return 0 if out else 3
+    print("unknown command", cmd)
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

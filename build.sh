@@ -24,6 +24,14 @@ crux-kmsg-tap dmesg-snap power-snap"
 # 定时器（挂在 timers.target 上）
 TIMERS="crux-time-sync.timer qcom-subsys-start.timer"
 
+# 注意：SIM / 外挂 X50（sdx50m）那一整套【不在这里启用】。
+#   overlay/opt/crux/sim-x50/ 里按系统路径镜像保存着全部 x50-* 单元与程序，
+#   但它们落在 /opt/crux/sim-x50，不会自动生效；需要时在设备上执行：
+#       crux-sim-x50 enable      # 铺回 /etc、/usr/local 并 enable
+#       crux-sim-x50 status      # 查看
+#       crux-sim-x50 disable     # 撤掉
+#   默认值记录在 /etc/crux-sim.conf 的 SIM_X50_ENABLE=0。
+
 need() { command -v "$1" >/dev/null || { echo "缺少 $1，请先 apt-get install -y $2"; exit 1; }; }
 need debootstrap debootstrap
 
@@ -78,6 +86,7 @@ for t in $TIMERS; do
     && echo "  enabled $t" || echo "  !! 启用失败: $t"
 done
 echo "  （npu-boot.service 默认不启用，需要时手动 systemctl enable）"
+echo "  （SIM/X50 整套默认不启用，需要时执行 crux-sim-x50 enable）"
 
 echo "== [6/6] 基本配置 =="
 echo crux > "$DEST/etc/hostname"

@@ -1,0 +1,17 @@
+[Unit]
+Description=X50 PDC auto select/load/activate (MBN chosen per SIM)
+Documentation=memory://crux X50 PDC
+After=x50-qmi-l4.service modem-mgr.service x50-uim-prepare.service
+Wants=x50-qmi-l4.service x50-uim-prepare.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/x50-pdc-apply
+RemainAfterExit=yes
+TimeoutStartSec=900
+Nice=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

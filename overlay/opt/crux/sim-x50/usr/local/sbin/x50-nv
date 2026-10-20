@@ -1,0 +1,195 @@
+#!/usr/bin/env python3
+"""x50-nv — X50 NV read/write over DIAG (HDLC 帧)
+语义对齐原厂 ModemEndPoint::sendRawSync：读=请求+应答，写=请求+回读校验。
+用法:
+  x50-nv read <item>
+  x50-nv write <item> <hexdata|@file>
+  x50-nv compare <items.json>
+  x50-nv push <items.json> [id,id...] [--dry]
+"""
+import os, select, time, struct, sys, json
+
+DEV = os.environ.get("X50_DIAG", "/dev/wwan0qcdm0")
+BACKUP = "/var/lib/x50-modem/nv-backup"
+
+
+def crc16(x):
+    c = 0xFFFF
+    for b in x:
+        c ^= b
+        for _ in range(8):
+            c = (c >> 1) ^ 0x8408 if c & 1 else c >> 1
+    return c ^ 0xFFFF
+
+
+def hdlc(p):
+    body = p + struct.pack("<H", crc16(p))
+    o = bytearray()
+    for b in body:
+        o += bytes([0x7D, b ^ 0x20]) if b in (0x7E, 0x7D) else bytes([b])
+    return b"\x7e" + bytes(o) + b"\x7e"
+
+
+def unesc(f):
+    o = bytearray(); i = 0
+    while i < len(f):
+        if f[i] == 0x7D and i + 1 < len(f):
+            o.append(f[i + 1] ^ 0x20); i += 2
+        else:
+            o.append(f[i]); i += 1
+    return bytes(o)
+
+
+class Diag:
+    def __init__(self, dev=DEV):
+        self.fd = os.open(dev, os.O_RDWR | os.O_NONBLOCK)
+
+    def _read(self, t):
+        end = time.time() + t
+        out = b""
+        while time.time() < end:
+            r, _, _ = select.select([self.fd], [], [], 0.05)
+            if not r:
+                continue
+            try:
+                out += os.read(self.fd, 65536)
+            except OSError:
+                self.fd = os.open(DEV, os.O_RDWR | os.O_NONBLOCK)
+                return out
+        return out
+
+    def drain(self, t=0.35):
+        self._read(t)
+
+    def req(self, payload, cmd, item=None, wait=1.0):
+        self.drain()
+        os.write(self.fd, hdlc(payload))
+        end = time.time() + wait
+        buf = b""
+        while time.time() < end:
+            buf += self._read(0.1)
+            for f in buf.split(b"\x7e"):
+                if len(f) < 4:
+                    continue
+                p = unesc(f)
+                if not p or p[0] != cmd:
+                    continue
+                if item is not None and struct.unpack("<H", p[1:3])[0] != item:
+                    continue
+                return p
+        return None
+
+    def read(self, item):
+        for _ in range(2):
+            p = self.req(bytes([0x26]) + struct.pack("<H", item), 0x26, item)
+            if p:
+                return p[3:]
+        return None
+
+    def write(self, item, data):
+        p = self.req(bytes([0x27]) + struct.pack("<H", item) + data, 0x27, item, wait=1.6)
+        if not p:
+            return None
+        return p[3] if len(p) > 3 else 0xff
+
+
+def cmd_read(d, item):
+    v = d.read(item)
+    print("item %d: %s" % (item, "NO-RESP" if v is None else "%dB %s" % (len(v), v.hex())))
+
+
+def cmd_write(d, item, spec):
+    if spec.startswith("@"):
+        data = open(spec[1:], "rb").read()
+    else:
+        data = bytes.fromhex(spec)
+    old = d.read(item)
+    st = d.write(item, data)
+    new = d.read(item)
+    print("write item %d: status=%s" % (item, "None" if st is None else "0x%02x" % st))
+    print("  old:", "None" if old is None else old[:16].hex())
+    print("  new:", "None" if new is None else new[:16].hex())
+    if new is not None:
+        n = min(len(data), len(new))
+        print("  match:", new[:n] == data[:n])
+
+
+def cmd_compare(d, path):
+    items = json.load(open(path))
+    seen = set()
+    same = diff = none = 0
+    for it in items:
+        i = it["id"]
+        if i in seen:
+            continue
+        seen.add(i)
+        want = bytes.fromhex(it["data"])
+        got = d.read(i)
+        if got is None:
+            print("%6d %-30s NO-RESP" % (i, it["name"]))
+            none += 1
+            continue
+        n = min(len(want), len(got))
+        k = next((x for x in range(n) if want[x] != got[x]), None)
+        if k is None:
+            print("%6d %-30s SAME  (want %dB / got %dB)" % (i, it["name"], len(want), len(got)))
+            same += 1
+        else:
+            print("%6d %-30s DIFF@%d got=%s want=%s" % (
+                i, it["name"], k, got[max(0, k - 2):k + 6].hex(), want[max(0, k - 2):k + 6].hex()))
+            diff += 1
+    print("same=%d diff=%d noresp=%d" % (same, diff, none))
+
+
+def cmd_push(d, path, sel, dry):
+    items = json.load(open(path))
+    os.makedirs(BACKUP, exist_ok=True)
+    seen = set()
+    for it in items:
+        i = it["id"]
+        if i in seen or (sel and str(i) not in sel):
+            continue
+        seen.add(i)
+        want = bytes.fromhex(it["data"])
+        got = d.read(i)
+        if got is not None:
+            n = min(len(want), len(got))
+            if got[:n] == want[:n]:
+                print("%6d SAME skip" % i)
+                continue
+            open(os.path.join(BACKUP, "%d.bin" % i), "wb").write(got)
+        print("%6d %-28s -> write %dB%s" % (i, it["name"], len(want), " (dry)" if dry else ""))
+        if dry:
+            continue
+        st = d.write(i, want)
+        new = d.read(i)
+        n = min(len(want), len(new)) if new else 0
+        print("        status=%s verify=%s" % (
+            "None" if st is None else "0x%02x" % st, new[:n] == want[:n] if new else False))
+
+
+def main():
+    if len(sys.argv) < 2:
+        print(__doc__); return 2
+    op = sys.argv[1]
+    d = Diag()
+    if op == "read" and len(sys.argv) > 2:
+        cmd_read(d, int(sys.argv[2]))
+    elif op == "write" and len(sys.argv) > 3:
+        cmd_write(d, int(sys.argv[2]), sys.argv[3])
+    elif op == "compare" and len(sys.argv) > 2:
+        cmd_compare(d, sys.argv[2])
+    elif op == "push" and len(sys.argv) > 2:
+        sel = None
+        dry = "--dry" in sys.argv
+        args = [a for a in sys.argv[3:] if not a.startswith("--")]
+        if args:
+            sel = set(x.strip() for x in args[0].split(","))
+        cmd_push(d, sys.argv[2], sel, dry)
+    else:
+        print(__doc__); return 2
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

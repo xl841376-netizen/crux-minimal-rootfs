@@ -1,0 +1,11 @@
+[Unit]
+Description=X50 modem boot (esoc cycle -> sahara feed -> services)
+After=local-fs.target systemd-modules-load.service
+Wants=local-fs.target
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/x50-modem-boot.sh
+TimeoutStartSec=900
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,122 @@
+#!/usr/bin/env python3
+# x50-pdc-select: 按原厂 qcril_mbn 的思路给模组挑 MBN
+#   1) 读卡 IMSI -> MCC/MNC -> 运营商目录
+#   2) 在固件 mcfg_sw 目录里按优先级挑一个 mcfg_sw.mbn
+#   3) plan: 只打印；apply: pdc-load-config -> pdc-activate-config
+# 选择权交给卡（IMSI）与目录优先级，不做人工 ID 分析（ID 由 qmicli/设备解析）
+import os, re, subprocess, sys
+
+QRTR = "qrtr://0"
+BASE = "/lib/firmware/qcom/sdx50m/modem_pr/mcfg/configs/mcfg_sw/generic"
+
+OP_MAP = [
+    (("46000", "46002", "46004", "46007", "46008"), "cmcc"),
+    (("46001", "46006", "46009"), "cu"),
+    (("46003", "46005", "46011"), "ct"),
+]
+
+PREF = [
+    "commerci/volte_op/mcfg_sw.mbn",
+    "commerci/openmkt/mcfg_sw.mbn",
+    "commerci/hvolte_o/mcfg_sw.mbn",
+    "commerci/volte_co/mcfg_sw.mbn",
+]
+
+
+def run(args, timeout=40):
+    try:
+        p = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+        return p.returncode, (p.stdout or "") + (p.stderr or "")
+    except Exception as e:
+        return 1, "%s: %s" % (type(e).__name__, e)
+
+
+def read_imsi():
+    rc, out = run(["qmicli", "-d", QRTR, "--uim-read-transparent=0x3F00,0x7FFF,0x6F07"], 30)
+    hexs = ""
+    for ln in out.splitlines():
+        ln = ln.strip()
+        if re.fullmatch(r"([0-9a-fA-F]{2}:)+[0-9a-fA-F]{2}", ln):
+            hexs = ln.replace(":", "")
+    if not hexs:
+        return None, "no-data"
+    b = bytes.fromhex(hexs)
+    body = b[1:] if b and b[0] == len(b) - 1 else b
+    sw = "".join("%X%X" % (x & 0x0F, x >> 4) for x in body)
+    return sw, "raw=" + hexs + " swapped=" + sw
+
+
+def pick(sw):
+    op = None
+    for codes, name in OP_MAP:
+        if any(c in (sw or "") for c in codes):
+            op = name
+            break
+    cands = []
+    if op:
+        d = os.path.join(BASE, "china", op)
+        for rel in PREF:
+            p = os.path.join(d, rel)
+            if os.path.isfile(p):
+                cands.append(p)
+        if os.path.isdir(d):
+            for root, _dn, fn in os.walk(d):
+                if "commerci" in root and "mcfg_sw.mbn" in fn:
+                    p = os.path.join(root, "mcfg_sw.mbn")
+                    if p not in cands:
+                        cands.append(p)
+    dflt = os.path.join(BASE, "common/default/sm8150.p/default/mcfg_sw.mbn")
+    if os.path.isfile(dflt):
+        cands.append(dflt)
+    return op, cands
+
+
+def list_sw():
+    rc, out = run(["qmicli", "-d", QRTR, "--pdc-list-configs=software"], 30)
+    return out.strip()
+
+
+def main():
+    mode = sys.argv[1] if len(sys.argv) > 1 else "plan"
+    sw, note = read_imsi()
+    print("[imsi]", note)
+    op, cands = pick(sw)
+    print("[operator]", op or "unknown")
+    if not cands:
+        print("[pick] no candidate")
+        return 1
+    for i, c in enumerate(cands[:5]):
+        print("  cand%d %s" % (i, c))
+    target = cands[0]
+    print("[target]", target)
+    print("[pdc before]")
+    print(list_sw())
+    if mode != "apply":
+        print("[plan] 只选不写；用 apply 执行 load+activate")
+        return 0
+    rc, out = run(["qmicli", "-d", QRTR, "--pdc-load-config=" + target], 120)
+    print("[load] rc=%d %s" % (rc, " | ".join(out.strip().splitlines()[-3:])))
+    if rc != 0:
+        return 2
+    cid = None
+    for ln in out.splitlines():
+        m = re.search(r"[Cc]onfig(?:uration)?\s*[Ii][Dd]\s*[:=]\s*'?([0-9a-fA-F]{8,})", ln)
+        if m:
+            cid = m.group(1)
+    if not cid:
+        rc2, out2 = run(["qmicli", "-d", QRTR, "--pdc-list-configs=software"], 30)
+        m = re.search(r"([0-9a-fA-F]{16,})", out2)
+        cid = m.group(1) if m else None
+    print("[config_id]", cid)
+    if not cid:
+        print("[activate] skipped: no config id parsed")
+        return 3
+    rc, out = run(["qmicli", "-d", QRTR, "--pdc-activate-config=software,%s" % cid], 120)
+    print("[activate] rc=%d %s" % (rc, " | ".join(out.strip().splitlines()[-3:])))
+    print("[pdc after]")
+    print(list_sw())
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

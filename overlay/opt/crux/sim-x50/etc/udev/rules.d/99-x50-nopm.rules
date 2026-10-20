@@ -1,0 +1,3 @@
+# crux: X50(SDX50M) MHI 设备的 M3 唤醒会失败(-5)导致链路掉，直接禁掉运行态 PM
+ACTION=="add", SUBSYSTEM=="pci", ATTR{vendor}=="0x17cb", ATTR{device}=="0x0305", ATTR{power/control}="on"
+ACTION=="add", SUBSYSTEM=="pci", ATTR{vendor}=="0x17cb", ATTR{device}=="0x0306", ATTR{power/control}="on"

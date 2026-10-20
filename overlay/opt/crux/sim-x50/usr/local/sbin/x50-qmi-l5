@@ -1,0 +1,331 @@
+#!/usr/bin/env python3
+# x50-qmi-l5: crux X50 (SDX50M) L5 —— 把“抬 online 前的前置条件”串成一条链
+#
+#   链路：读 L4 状态 → preflight（modem UP / 服务数 / L4 新鲜度 / 四路端口 / UIM 可读）
+#         → 卡门控 → (授权后) 通过 L4 命令通道下 DMS Set Operating Mode(0x002E)=online
+#         → 看 cmd_results 回包 → 等 NAS registered → 超时/被拒则退避
+#
+#   纯消费者，自己不建任何 QMI socket（避免和 L4 抢 client / 规避 qrtr 阻塞）。
+#   默认 dry-run：只算门控、输出 would-raise，不下发。--online 才真发。
+import json, os, subprocess, sys, time, traceback
+
+L4_STATE = os.environ.get("X50_L4_STATE", "/run/x50-l4.json")
+L4_CMD = os.environ.get("X50_L4_CMD", "/run/x50-l4.cmd")
+STATE_FILE = os.environ.get("X50_L5_STATE", "/run/x50-l5.json")
+LOG = "/var/log/x50-l5.log"
+MODEM_MGR = "/usr/local/sbin/modem-mgr"
+
+L4_STALE = 20.0        # L4 状态文件超过这个秒数没更新 → 判定失效
+WAIT_SECS = 90.0       # 兜底上限（原厂 74s + 余量）；真正退出看条件，命中即结束
+PROBE_INT = 5.0        # 抬起后探测 DMS op mode 的间隔
+STUCK_ROUNDS = 3       # 连续 3 次探测仍停在 offline/shutting_down → 提前判定未生效
+BACKOFF = 300.0        # 被拒/超时后的退避
+MIN_SERVICES = 10      # X50 服务条数下限（正常 12，晚发布会先 10）
+
+CARD_STATE = {0: "absent", 1: "present", 2: "error"}
+CARD_ERR = {0: "ok", 1: "power_down", 2: "poll_error", 3: "no_atr_received",
+            4: "voltage_mismatch", 5: "parity_error", 6: "card_removed", 7: "technical"}
+APP_STATE = {0: "unknown", 1: "detected", 2: "pin1_required", 3: "puk1_required",
+             4: "pin1_blocked", 5: "device_blocked", 6: "illegal", 7: "ready"}
+NAS_REG = {0: "not_registered", 1: "registered", 2: "searching",
+           3: "denied", 4: "unknown", 5: "roaming"}
+QMI_CORE_ERR = {0: "none", 1: "malformed_msg", 3: "internal", 17: "missing_argument",
+                26: "invalid_arg", 60: "device_not_ready", 71: "invalid_message_id"}
+
+
+def log(m):
+    line = "%s %s" % (time.strftime("%F %T"), m)
+    try:
+        with open(LOG, "a") as f:
+            f.write(line + "\n")
+    except OSError:
+        pass
+
+
+def read_json(path):
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def read_l4():
+    d = read_json(L4_STATE)
+    if not d:
+        return None, None
+    try:
+        age = time.time() - float(d.get("ts") or 0)
+    except Exception:
+        age = None
+    return d, age
+
+
+def modem_state():
+    try:
+        p = subprocess.run([MODEM_MGR, "state"], capture_output=True, text=True, timeout=12)
+        return json.loads(p.stdout)
+    except Exception as e:
+        log("[modem] state failed: %s: %s" % (type(e).__name__, e))
+        return {}
+
+
+def tlv_of(res, num):
+    for t, v in (res.get("tlvs") or []):
+        if t == num:
+            return v
+    return None
+
+
+def card_gate(l4):
+    uim = (l4.get("services") or {}).get("uim") or {}
+    cards = ((uim.get("cards") or {}).get("cards")) or []
+    out, best = [], None
+    for i, c in enumerate(cards):
+        apps = c.get("apps") or []
+        ready = any(a.get("state") == 7 for a in apps)
+        ent = {"slot": i, "state_name": CARD_STATE.get(c.get("state"), "?"),
+               "error_name": CARD_ERR.get(c.get("error"), "?"), "ready": ready,
+               "apps": [APP_STATE.get(a.get("state"), "?") for a in apps]}
+        out.append(ent)
+        if c.get("state") == 1 and c.get("error") == 0 and ready:
+            best = ent
+    if not cards:
+        reason = "no uim data"
+    elif best:
+        reason = None
+    else:
+        parts = []
+        for e in out:
+            if e["state_name"] == "absent":
+                continue
+            if e["state_name"] == "error":
+                parts.append("slot%d=error(%s)" % (e["slot"], e["error_name"]))
+            else:
+                parts.append("slot%d=present(app=%s)" % (e["slot"], ",".join(e["apps"]) or "none"))
+        reason = ",".join(parts) or "all absent"
+    return {"available": best is not None, "cards": out, "reason": reason}
+
+
+def nas_view(l4):
+    res = (l4.get("services") or {}).get("nas") or {}
+    v = tlv_of(res, 0x01)
+    if not v or len(v) < 2:
+        return None
+    try:
+        b = bytes.fromhex(v)
+        return {"reg_state": b[0], "reg_state_name": NAS_REG.get(b[0], "?"), "raw": v}
+    except Exception:
+        return None
+
+
+def latest_cmd(l4, svc="dms", msg=0x002E, after=0, idx=None):
+    # 用 >= 而不是 >：同一秒内发出并回包（ts 相等）必须算数；
+    # idx=发送前的列表长度 → 精确排除旧回包（防同秒旧 error 误判）。
+    rows = l4.get("cmd_results") or []
+    if idx is not None and 0 <= idx <= len(rows):
+        rows = rows[idx:]
+    hits = [r for r in rows
+            if r.get("svc") == svc and r.get("msg") == msg and (r.get("ts") or 0) >= after]
+    return hits[-1] if hits else None
+
+
+def evaluate(allow_online, st):
+    now = time.time()
+    l4, age = read_l4()
+    m = modem_state() or {}
+    srv = (l4 or {}).get("services") or {}
+
+    checks = []
+
+    def chk(name, ok, detail=""):
+        checks.append({"name": name, "ok": bool(ok), "detail": detail})
+        return bool(ok)
+
+    chk("modem_up", m.get("state") == "UP", "state=%s" % m.get("state"))
+    chk("x50_services", (m.get("x50_services") or 0) >= MIN_SERVICES,
+        "services=%s" % m.get("x50_services"))
+    chk("l4_fresh", age is not None and age <= L4_STALE,
+        "no state" if age is None else "age=%.0fs" % age)
+    chk("l4_services", all(k in srv for k in ("dms", "nas", "wds", "uim")),
+        ",".join(sorted(srv)) or "none")
+    gate = card_gate(l4 or {})
+    chk("uim_ready", gate["available"], gate.get("reason") or "")
+    nas = nas_view(l4 or {})
+
+    snap = {"ts": int(now), "checks": checks, "card": gate, "nas": nas,
+            "allow_online": allow_online}
+
+    fail = next((c for c in checks if not c["ok"]), None)
+    if fail:
+        snap["state"] = "BLOCKED_" + fail["name"].upper()
+        snap["detail"] = fail["detail"]
+        return snap
+
+    if now < st.get("backoff_until", 0):
+        snap["state"] = "BACKOFF"
+        snap["detail"] = "%ds left (last: %s)" % (int(st["backoff_until"] - now), st.get("backoff_reason", ""))
+        return snap
+
+    if nas and nas.get("reg_state") == 1:
+        snap["state"] = "ONLINE_OK"
+        snap["detail"] = "nas registered (%s)" % nas.get("reg_state_name")
+        return snap
+
+    if not allow_online:
+        snap["state"] = "READY_DRY"
+        snap["detail"] = "preflight passed; would raise online (dry-run)"
+        return snap
+
+    sent = st.get("sent_ts") or 0
+    if sent:
+        # ① 抬起请求本身的回包：被拒是最强否定条件
+        r = latest_cmd(l4 or {}, after=0, idx=st.get("before_n"))
+        if r and r.get("result") != 0:
+            err = r.get("error")
+            snap["state"] = "ONLINE_DENIED"
+            snap["error"] = err
+            snap["error_name"] = QMI_CORE_ERR.get(err, str(err))
+            snap["detail"] = "set_operating_mode denied: error=%s(%s)" % (err, QMI_CORE_ERR.get(err, "?"))
+            st["sent_ts"] = 0
+            st["backoff_until"] = now + BACKOFF
+            st["backoff_reason"] = "denied error=%s" % err
+            return snap
+
+        # ② 探测当前 op mode（0x002D，只读）
+        op = None
+        q = latest_cmd(l4 or {}, svc="dms", msg=0x002D, after=0, idx=st.get("before_n"))
+        if q:
+            v = tlv_of(q, 0x01)
+            if v and len(v) >= 2:
+                try:
+                    op = int(v[:2], 16)
+                except ValueError:
+                    op = None
+        snap["op_mode"] = op
+
+        # ③ 条件 A：NAS 已注册 → 成功，立即结束
+        if nas and nas.get("reg_state") == 1:
+            snap["state"] = "ONLINE_OK"
+            snap["detail"] = "nas registered (%s)%s" % (
+                nas.get("reg_state_name"), "" if op is None else ", op=%d" % op)
+            st.update({"sent_ts": 0, "probe_ts": 0, "op_same": 0})
+            return snap
+
+        # ④ 条件 B：op mode 已变 online(1) → 成功，立即结束
+        if op == 1:
+            snap["state"] = "ONLINE_OK"
+            snap["detail"] = "op_mode online (confirmed by 0x002D)"
+            st.update({"sent_ts": 0, "probe_ts": 0, "op_same": 0})
+            return snap
+
+        # ⑤ 条件 C：连续仍停在 offline(3)/shutting_down(5) → 提前判未生效
+        if op in (3, 5):
+            if st.get("last_op") == op:
+                st["op_same"] = (st.get("op_same") or 0) + 1
+            else:
+                st["op_same"] = 1
+                st["last_op"] = op
+            if st["op_same"] >= STUCK_ROUNDS:
+                snap["state"] = "ONLINE_STUCK"
+                snap["detail"] = "op still %d after %d probes (accepted but not applied)" % (
+                    op, st["op_same"])
+                st.update({"sent_ts": 0, "probe_ts": 0, "op_same": 0})
+                st["backoff_until"] = now + BACKOFF
+                st["backoff_reason"] = "stuck op=%d" % op
+                return snap
+        else:
+            st["op_same"] = 0
+            st["last_op"] = op
+
+        # ⑥ 探测节流（限频率，不是死等秒数）
+        if now - (st.get("probe_ts") or 0) >= PROBE_INT:
+            try:
+                with open(L4_CMD, "w") as f:
+                    f.write("2 002D\n")
+                st["probe_ts"] = now
+            except OSError as e:
+                log("[l5] probe write failed: %s" % e)
+
+        # ⑦ 兜底时限（原厂 74s + 余量），只防永久挂住
+        if now - sent >= WAIT_SECS:
+            snap["state"] = "ONLINE_TIMEOUT"
+            snap["detail"] = "waited %ds, no confirming condition (op=%s)" % (int(now - sent), op)
+            st.update({"sent_ts": 0, "probe_ts": 0})
+            st["backoff_until"] = now + BACKOFF
+            st["backoff_reason"] = "timeout"
+            return snap
+
+        snap["state"] = "ONLINE_WAIT"
+        snap["detail"] = "sent %ds ago, op=%s, waiting condition" % (int(now - sent), op)
+        return snap
+
+    # 真正抬起：走 L4 命令通道（用 L4 的长驻 socket，事件才收得到）
+    st["before"] = max([r.get("ts", 0) for r in (l4.get("cmd_results") or [])] or [0])
+    st["before_n"] = len(l4.get("cmd_results") or [])
+    st["sent_ts"] = now
+    st.update({"op_same": 0, "last_op": None, "probe_ts": 0})
+    try:
+        with open(L4_CMD, "w") as f:
+            f.write("2 002E 01010001\n")
+        log("[l5] queue DMS set_operating_mode(online) via L4 cmd channel")
+        snap["state"] = "ONLINE_SENT"
+        snap["detail"] = "queued: DMS 0x002E TLV0x01=01 online"
+    except OSError as e:
+        st["sent_ts"] = 0
+        snap["state"] = "RAISE_FAILED"
+        snap["detail"] = "cannot write %s: %s" % (L4_CMD, e)
+    return snap
+
+
+def write(snap):
+    try:
+        tmp = STATE_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(snap, f, ensure_ascii=False)
+        os.replace(tmp, STATE_FILE)
+    except OSError as e:
+        log("[state] write failed: %s" % e)
+
+
+def daemon(interval, allow_online):
+    log("[l5] start interval=%.1fs online=%s" % (interval, allow_online))
+    st = {}
+    last = None
+    while True:
+        try:
+            snap = evaluate(allow_online, st)
+            write(snap)
+            if snap.get("state") != last:
+                log("[l5] %s -> %s (%s)" % (last, snap.get("state"), snap.get("detail")))
+                last = snap.get("state")
+        except Exception as e:
+            log("[l5] error: %s: %s\n%s" % (type(e).__name__, e, traceback.format_exc()))
+        time.sleep(interval)
+
+
+def main(argv):
+    cmd = argv[1] if len(argv) > 1 else "status"
+    allow_online = "--online" in argv
+    if cmd == "status":
+        snap = evaluate(allow_online, {})
+        print(json.dumps(snap, indent=2, ensure_ascii=False))
+        return 0
+    if cmd == "daemon":
+        interval = 5.0
+        for a in argv[2:]:
+            try:
+                interval = float(a)
+            except ValueError:
+                continue
+        try:
+            daemon(interval, allow_online)
+        except KeyboardInterrupt:
+            pass
+        return 0
+    print("usage: x50-qmi-l5 [status|daemon [interval]] [--online]")
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

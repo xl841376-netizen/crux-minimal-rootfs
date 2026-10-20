@@ -1,0 +1,11 @@
+[Unit]
+Description=X50 liveness monitor
+After=local-fs.target
+
+[Service]
+ExecStart=/usr/local/bin/x50-liveness.sh
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

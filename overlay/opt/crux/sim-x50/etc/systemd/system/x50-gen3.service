@@ -1,0 +1,14 @@
+[Unit]
+Description=crux X50 PCIe Gen3 (8GT/s) link training
+After=multi-user.target
+Wants=multi-user.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/x50-gen3.sh
+RemainAfterExit=yes
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

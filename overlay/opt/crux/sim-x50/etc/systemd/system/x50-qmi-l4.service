@@ -1,0 +1,13 @@
+[Unit]
+Description=crux X50 L4 QMI session layer
+After=modem-mgr.service
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/x50-qmi-l4 daemon 5
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

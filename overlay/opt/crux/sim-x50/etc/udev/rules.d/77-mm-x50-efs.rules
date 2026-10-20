@@ -1,0 +1,4 @@
+# X50 的 EFS 通道是模组的远程存储传输，不是控制口。
+# MM 拿 AT 串去探它会变成垃圾数据（F3: "rmts_srv:Received %d bytes" 刷屏）并让模组 ERRFATAL。
+SUBSYSTEM=="wwan", KERNEL=="wwan0efs0", ENV{ID_MM_PORT_IGNORE}="1"
+SUBSYSTEM=="wwan", KERNEL=="*efs*", ENV{ID_MM_PORT_IGNORE}="1"

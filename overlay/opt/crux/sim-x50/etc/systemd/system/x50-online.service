@@ -1,0 +1,13 @@
+[Unit]
+Description=X50 modem bring ONLINE (DMS_SET_OPERATING_MODE, no diag)
+After=x50-modem-boot.service
+Wants=x50-modem-boot.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/x50-online.sh
+RemainAfterExit=yes
+TimeoutStartSec=900
+
+[Install]
+WantedBy=multi-user.target

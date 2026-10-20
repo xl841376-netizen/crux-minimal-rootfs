@@ -1,0 +1,1063 @@
+#!/usr/bin/env python3
+# modem-mgr: crux 多模组域管理器 + X50 生命周期监督（node0 内建 / node3 X50）
+# 职责：
+#   1) NS 订阅维护服务表 -> 按域(node)路由 -> 串行化 QMI 请求 -> 对上层提供 API
+#   2) 监督 X50 状态机（DOWN/SBL/MHI/UP），必要时拉起 bringup，UP 后拨 online、挂卡监控
+# 用法：
+#   modem-mgr daemon
+#   modem-mgr status
+#   modem-mgr state
+#   modem-mgr bringup
+#   modem-mgr list [--node N] [--service S]   # 带服务名与提供者
+#   modem-mgr send <node> <service> <msg_hex> [tlv_hex] [timeout_s]
+#   modem-mgr watch [seconds]
+
+import json
+import os
+import random
+import signal
+import re
+import socket
+import struct
+import subprocess
+import traceback
+import queue
+import sys
+import threading
+import time
+
+AF_QIPCRTR = 42
+QRTR_NODE_BCAST = 0xFFFFFFFF
+QRTR_PORT_CTRL = 0xFFFFFFFE
+T_NEW_SERVER = 4
+T_DEL_SERVER = 5
+T_NEW_LOOKUP = 10
+LOCAL_NODE = 1
+
+SOCK_PATH = "/run/modem-mgr.sock"
+CONF_PATH = "/etc/modem-mgr.conf"
+LOG_PATH = "/var/log/modem-mgr.log"
+
+BOOT_SCRIPT = "/usr/local/bin/x50-modem-boot.sh"
+FEED_SCRIPT = "/usr/local/bin/x50-feed-only.sh"
+ONLINE_SCRIPT = "/usr/local/bin/x50-online.sh"
+CARD_SCRIPT = "/usr/local/sbin/x50-uim-activate-safe.py"
+
+SERVICE_NAMES = {
+    1: "wds", 2: "dms", 3: "nas", 4: "qos", 5: "wms", 7: "auth", 8: "at",
+    9: "voice", 10: "cat", 11: "uim", 12: "pbm", 14: "rfs", 15: "test",
+    16: "loc", 17: "sar", 18: "imss", 19: "ims_qmi", 21: "efs", 22: "time",
+    23: "thermal_sensors", 24: "thermal_mitig", 25: "sap", 26: "wda",
+    29: "csvt", 31: "imsp", 32: "imsvt", 33: "imsa", 34: "coex", 36: "pdc",
+    40: "imsrtp", 41: "rfrpe", 42: "dsd", 43: "ssctl", 46: "atp", 47: "dpm",
+    48: "dfs", 49: "ipa_ctrl", 50: "uim_remote", 51: "coresight", 53: "ap_53",
+    54: "priv54", 55: "slim", 56: "lowi", 57: "wlps", 61: "sfs",
+    64: "servreg_loc", 66: "servreg_notif", 67: "blm", 68: "ott",
+    69: "ath10k_fw", 70: "lte", 71: "uim_http", 73: "priv73", 74: "antswitch",
+    75: "qdma", 77: "imsprivate", 78: "dfc", 227: "svs", 400: "sns",
+    769: "priv769", 770: "imsdcm", 4096: "tftp", 4098: "priv4098",
+    4099: "priv4099", 4100: "priv4100", 65508: "xiaomi_extend",
+}
+
+NODE_OWNERS = {
+    0: "sm8150-modem",
+    1: "AP-local",
+    2: "dsp2",
+    3: "X50-SDX50M",
+    5: "dsp5",
+    9: "dsp9(SNS)",
+    10: "dsp10",
+}
+
+AP_LOCAL_OWNER = {4096: "qrtr-ns", 64: "pd-mapper", 14: "rmtfs", 49: "ipa"}
+
+
+def svc_name(service):
+    return SERVICE_NAMES.get(service, "?")
+
+
+def svc_provider(node, service):
+    if node == 1:
+        return AP_LOCAL_OWNER.get(service, "AP-local")
+    return NODE_OWNERS.get(node, "node%d" % node)
+
+# 域定义：domain -> (node, 允许的 service 集合)
+DOMAINS = {
+    "msm": (0, None),                       # node0 内建 sm8150，全套
+    "x50": (3, {15, 21, 22, 23, 24, 25, 34, 36, 41, 54, 73, 78}),
+}
+
+
+ESOC_BROKEN_FLAG = "/var/lib/crux/esoc_broken"
+
+
+class EsocError(Exception):
+    """esoc 引脚命令失败。broken=True 表示驱动已卡死(EBUSY/超时)，只能主机重启。"""
+    def __init__(self, cmd, rc, out, broken):
+        self.cmd, self.rc, self.out, self.broken = cmd, rc, out, broken
+        super().__init__("esoc %s rc=%s broken=%s out=%r" % (cmd, rc, broken, out[:400]))
+
+
+def esoc_broken_flag():
+    return os.path.exists(ESOC_BROKEN_FLAG)
+
+
+def mark_esoc_broken(cmd, why):
+    try:
+        os.makedirs(os.path.dirname(ESOC_BROKEN_FLAG), exist_ok=True)
+        with open(ESOC_BROKEN_FLAG, "w") as f:
+            f.write("%s cmd=%s why=%s\n" % (time.strftime("%F %T"), cmd, why))
+    except OSError as e:
+        log("[fatal] cannot write esoc flag: %s" % e)
+    log("[fatal] ESOC BROKEN cmd=%s why=%s -> 停止一切 cycle，需主机重启" % (cmd, why))
+
+
+def clear_esoc_broken():
+    try:
+        os.unlink(ESOC_BROKEN_FLAG)
+    except OSError:
+        pass
+
+
+def dmesg_tail(n=25):
+    try:
+        p = subprocess.run(["dmesg"], capture_output=True, timeout=5)
+        lines = (p.stdout or b"").decode("utf-8", "replace").splitlines()
+        return "\n".join(lines[-n:])
+    except Exception as e:
+        return "<dmesg unavailable: %s>" % e
+
+
+def esoc_cmd(subcmd, timeout=20):
+    """执行一条 esoc 引脚命令；失败抛 EsocError（带 errno/stderr/dmesg 上下文）。"""
+    if esoc_broken_flag():
+        raise EsocError(subcmd, "skipped", "esoc_broken flag present", True)
+    rc, out = None, ""
+    try:
+        p = subprocess.run(["/usr/bin/python3", "/root/x50mods/x50_esoc.py", subcmd],
+                           capture_output=True, timeout=timeout)
+        rc = p.returncode
+        out = (p.stdout or b"").decode("utf-8", "replace") + \
+              (p.stderr or b"").decode("utf-8", "replace")
+    except subprocess.TimeoutExpired as e:
+        rc = "timeout"
+        out = "TimeoutExpired after %ss: %r" % (timeout, e)
+    except Exception as e:
+        rc = "spawn-fail"
+        out = "%s: %s" % (type(e).__name__, e)
+    low = out.lower()
+    hard = any(k in low for k in ("resource busy", "errno 16", "errno16", "errno 110",
+                                  "errno110", "previous command is still running",
+                                  "timed out", "timeout"))
+    if rc == 0 and not hard:
+        log("[esoc] %s ok" % subcmd)
+        return out
+    log("[esoc] %s FAILED rc=%s out=%r" % (subcmd, rc, out[:500]))
+    log("[esoc] dmesg tail:\n%s" % dmesg_tail())
+    if hard:
+        mark_esoc_broken(subcmd, (out.strip().splitlines() or [str(rc)])[-1][:200])
+    raise EsocError(subcmd, rc, out, hard)
+
+
+def log(msg):
+
+    line = "%s %s" % (time.strftime("%F %T"), msg)
+    try:
+        with open(LOG_PATH, "a") as f:
+            f.write(line + "\n")
+    except OSError:
+        pass
+
+
+def ns_socket():
+    s = socket.socket(AF_QIPCRTR, socket.SOCK_DGRAM, 0)
+    for _ in range(20):
+        try:
+            s.bind((LOCAL_NODE, 0))
+            return s
+        except OSError:
+            time.sleep(0.05)
+    raise RuntimeError("qrtr bind failed")
+
+
+def ctrl_lookup(sock, service=0, instance=0):
+    """只对 node1 单播查询。
+    警告：发到 QRTR_NODE_BCAST 时内核走 qrtr_bcast_enqueue，
+    X50 半死（MHI/services=0）会永久阻塞在 D 状态，SIGKILL 无效，禁止使用。"""
+    pkt = struct.pack("<IIIII", T_NEW_LOOKUP, service, instance, 0, 0)
+    sock.sendto(pkt, (LOCAL_NODE, QRTR_PORT_CTRL))
+
+
+def ns_worker_main():
+    """独立进程：只做 NS 单播查询 + 事件收集，每 2s 输出一次全量快照。
+    放在子进程里是为了让内核 qrtr 阻塞永远拖不到 daemon 主线程。"""
+    s = socket.socket(AF_QIPCRTR, socket.SOCK_DGRAM, 0)
+    s.bind((LOCAL_NODE, 0))
+    s.settimeout(0.5)
+    ctrl_lookup(s)
+    servers = {}
+    last_req = time.time()
+    last_dump = 0.0
+    while True:
+        try:
+            d, _a = s.recvfrom(4096)
+        except socket.timeout:
+            d = None
+        except OSError as e:
+            sys.stderr.write("recv error: %s\n" % e)
+            return 2
+        if d and len(d) >= 20:
+            cmd, svc, ins, node, port = struct.unpack("<IIIII", d[:20])
+            if cmd == T_NEW_SERVER:
+                if svc or node or port:
+                    servers[(node, svc, ins)] = port
+            elif cmd == T_DEL_SERVER:
+                servers.pop((node, svc, ins), None)
+        now = time.time()
+        if now - last_req > 20:
+            ctrl_lookup(s)
+            last_req = now
+        if now - last_dump > 2:
+            print(json.dumps({"type": "snapshot",
+                              "servers": [[n, sv, i, p] for (n, sv, i), p in servers.items()]}),
+                  flush=True)
+            last_dump = now
+
+
+class NsTable:
+    """服务表：(node, service, instance) -> port，事件驱动 + 周期自愈"""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.servers = {}
+        self.last_ev = {}
+        self.sock = ns_socket()
+        self.sock.settimeout(1.0)
+        self.stop = False
+
+    def snapshot(self):
+        with self.lock:
+            return dict(self.servers)
+
+    def find(self, node, service, instance=None):
+        with self.lock:
+            for (n, svc, ins), port in self.servers.items():
+                if n != node or svc != service:
+                    continue
+                if instance is not None and (ins >> 8) != instance:
+                    continue
+                return port, ins
+        return None, None
+
+    def node_services(self, node):
+        with self.lock:
+            return sorted({svc for (n, svc, i) in self.servers if n == node})
+
+    def _apply_snapshot(self, servers):
+        with self.lock:
+            self.servers = servers
+            self.last_ev["snap"] = time.time()
+
+    def run(self):
+        """NS 采集放在子进程 ns-worker：内核 qrtr 发送在半死链路会永久 D，
+        绝不能让 daemon 主线程直接 sendto。子进程 15s 无输出即判卡死并记异常。"""
+        backoff = 0.0
+        while not self.stop:
+            if time.time() < backoff:
+                time.sleep(1)
+                continue
+            p = None
+            try:
+                p = subprocess.Popen(["/usr/bin/python3", "/usr/local/sbin/modem-mgr", "ns-worker"],
+                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                log("[ns] worker started pid=%d" % p.pid)
+            except Exception as e:
+                log("[ns] worker spawn failed: %s: %s\n%s" %
+                    (type(e).__name__, e, traceback.format_exc()))
+                backoff = time.time() + 30
+                continue
+            q = queue.Queue()
+
+            def _reader(pp=p, qq=q):
+                try:
+                    for line in pp.stdout:
+                        qq.put(line)
+                except Exception as e:
+                    sys.stderr.write("reader error: %s\n" % e)
+                qq.put(None)
+
+            threading.Thread(target=_reader, daemon=True, name="ns-reader").start()
+            last_line = time.time()
+            while not self.stop:
+                try:
+                    line = q.get(timeout=1.0)
+                except queue.Empty:
+                    line = ""
+                if line is None:
+                    log("[ns] worker stdout closed")
+                    break
+                if line:
+                    last_line = time.time()
+                    try:
+                        d = json.loads(line.decode("utf-8", "replace"))
+                        if d.get("type") == "snapshot":
+                            self._apply_snapshot({(a, b, c): e for a, b, c, e in d.get("servers", [])})
+                    except Exception as e:
+                        log("[ns] bad line %r: %s: %s" % (line[:120], type(e).__name__, e))
+                if time.time() - last_line > 15:
+                    err = b""
+                    try:
+                        p.kill()
+                        err = p.stderr.read(800)
+                    except Exception as e:
+                        err = ("kill/read fail: %s" % e).encode()
+                    log("[ns] worker hung >15s -> killed. stderr=%r" % err)
+                    log("[ns] 判定内核 qrtr 发送阻塞（半死链路），暂停 60s 不再重试")
+                    backoff = time.time() + 60
+                    break
+            try:
+                if p.poll() is None:
+                    p.kill()
+                log("[ns] worker exit rc=%s" % p.poll())
+            except Exception as e:
+                log("[ns] worker reap error: %s" % e)
+            if not self.stop and time.time() >= backoff:
+                backoff = time.time() + 3
+
+    def start(self):
+        t = threading.Thread(target=self.run, name="ns", daemon=True)
+        t.start()
+        return t
+
+
+def qmi_call(table, node, service, msg, tlv_bytes=b"", timeout=8.0, instance=None):
+    """向 (node, service) 发一条裸 QMI 请求，返回 (rc, txns, [(type,val)...])"""
+    port, inst = table.find(node, service, instance)
+    if port is None:
+        return {"error": "service-not-advertised", "node": node, "service": service}
+    s = socket.socket(AF_QIPCRTR, socket.SOCK_DGRAM, 0)
+    try:
+        s.bind((LOCAL_NODE, 0))
+    except OSError as e:
+        s.close()
+        return {"error": "bind:%s" % e}
+    txn = random.randint(1, 0xFFFF)
+    body = struct.pack("<BHHH", 0, txn, msg, len(tlv_bytes)) + tlv_bytes
+    s.sendto(body, (node, port))
+    s.settimeout(0.5)
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            d, _ = s.recvfrom(65536)
+        except socket.timeout:
+            continue
+        if len(d) < 7:
+            continue
+        _t, rtxn, rmsg, _l = struct.unpack("<BHHH", d[:7])
+        if rtxn != txn:
+            continue
+        tlvs, p = [], 7
+        while p + 3 <= len(d):
+            tt, tl = struct.unpack("<BH", d[p:p + 3])
+            p += 3
+            tlvs.append((tt, d[p:p + tl]))
+            p += tl
+        s.close()
+        return {"error": None, "node": node, "service": service, "port": port,
+                "instance": inst, "msg": rmsg, "tlvs": tlvs}
+    s.close()
+    return {"error": "timeout", "node": node, "service": service, "port": port}
+
+
+def tlv_ok(tlvs):
+    for t, v in tlvs:
+        if t == 0x02 and len(v) >= 4:
+            return struct.unpack("<HH", v[:4])
+    return None
+
+
+# ---------------- supervisor ----------------
+
+DEFAULT_CONF = {
+    "autostart": "1",
+    "down_secs": "3",
+    "cooldown": "900",
+    "startup_grace": "60",
+    "stuck_secs": "20",
+    "min_gap": "15",
+    "clean_timeout": "20",
+    "up_hold": "0",
+    "online_on_up": "1",
+    "activate_on_up": "1",
+    "card_monitor": "1",
+}
+
+
+class Supervisor:
+    """X50 生命周期状态机：替代 x50-liveness / x50-modem-boot / x50-online / x50-card-monitor"""
+
+    def __init__(self, table):
+        self.table = table
+        self.conf = dict(DEFAULT_CONF)
+        self.lock = threading.Lock()
+        self.state = "INIT"
+        self.state_since = time.time()
+        self.down_since = None
+        self.last_bringup = 0.0
+        self.last_up = 0.0
+        self.bringup_proc = None
+        self.online_proc = None
+        self.card_proc = None
+        self.up_handled = False
+        self.stage = "idle"
+        self.activate_proc = None
+        self.boot_ts = time.time()
+        self.stop = False
+
+    def load_conf(self):
+        try:
+            with open(CONF_PATH) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    k, v = line.split("=", 1)
+                    if k.strip() in DEFAULT_CONF:
+                        self.conf[k.strip()] = v.strip()
+        except OSError:
+            pass
+
+    def find_proc(self, needle):
+        for pid in os.listdir("/proc"):
+            if not pid.isdigit():
+                continue
+            try:
+                with open("/proc/%s/cmdline" % pid, "rb") as f:
+                    cl = f.read().replace(b"\0", b" ").decode("utf-8", "ignore")
+            except OSError:
+                continue
+            if needle in cl:
+                return int(pid)
+        return None
+
+    def probe_state(self):
+        if os.path.exists("/dev/mhi_pipe_10") and len(self.table.node_services(3)) >= 8:
+            return "UP"
+        if os.path.exists("/dev/mhi_pipe_2"):
+            return "SBL"
+        if os.path.exists("/sys/bus/mhi/devices/mhi0_IP_HW_OFFLOAD_0"):
+            return "MHI"
+        return "DOWN"
+
+    def spawn(self, argv, tag):
+        try:
+            return subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                    start_new_session=True)
+        except OSError as e:
+            log("[%s] spawn failed: %s" % (tag, e))
+            return None
+
+    def wait_for(self, pred, timeout=20.0, interval=0.3):
+        """条件等待：pred() 为真立即返回 True，超时才返回 False"""
+        t0 = time.time()
+        while time.time() - t0 < timeout:
+            try:
+                if pred():
+                    return True
+            except Exception:
+                pass
+            time.sleep(interval)
+        return False
+
+    def _loaders(self):
+        return [p for p in (self.find_proc("x50_sahara_loader"), self.find_proc("x50-modem-loader")) if p]
+
+    def _mhi0(self):
+        try:
+            return [n for n in os.listdir("/sys/bus/mhi/devices") if n.startswith("mhi0")]
+        except OSError:
+            return []
+
+    def is_clean(self):
+        return (not self.table.node_services(3)) and (not self._mhi0()) and (not self._loaders())
+
+    def stop_loaders(self):
+        """停 loader（x50-efs-sync.service 是它的父，先停服务再补刀）"""
+        if not self._loaders():
+            return True
+        try:
+            subprocess.run(["/bin/systemctl", "stop", "x50-efs-sync.service"],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
+            log("[clean] stop x50-efs-sync.service")
+        except Exception as e:
+            log("[clean] stop efs-sync failed: %s" % e)
+        for _ in range(5):
+            if self.wait_for(lambda: not self._loaders(), timeout=3.0):
+                return True
+            for pid in self._loaders():
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                    log("[clean] kill loader pid=%d" % pid)
+                except OSError:
+                    pass
+        return not self._loaders()
+
+    def detach_mhi(self):
+        """unbind mhi0*（保留驱动）；每个 unbind 用子进程带超时，避免内核卡死把守护进程一起拖住"""
+        for name in self._mhi0():
+            drv = os.path.realpath("/sys/bus/mhi/devices/%s/driver" % name)
+            ub = os.path.join(drv, "unbind")
+            if not os.path.exists(ub):
+                continue
+            try:
+                subprocess.run(["sh", "-c", "echo %s > %s" % (name, ub)],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=4)
+                log("[clean] unbind %s" % name)
+            except subprocess.TimeoutExpired:
+                log("[clean] unbind %s TIMEOUT (skip)" % name)
+            except Exception as e:
+                log("[clean] unbind %s err=%s" % (name, e))
+            self.wait_for(lambda: name not in self._mhi0(), timeout=1.5)
+        if self._mhi0():
+            # 孤儿设备（driver 已解绑，unbind 写不进去）：摘掉它们的 PCIe 端点（不是根端口，不动引脚）
+            seen = set()
+            for name in self._mhi0():
+                p = os.path.realpath("/sys/bus/mhi/devices/" + name)
+                parts = p.split("/")
+                ep = None
+                for c in parts:
+                    if c.startswith("0001:") and c != "0001:00:00.0":
+                        ep = c
+                if not ep or ep in seen:
+                    continue
+                seen.add(ep)
+                try:
+                    subprocess.run(["sh", "-c", "echo 1 > /sys/bus/pci/devices/%s/remove" % ep],
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+                    log("[clean] pci endpoint remove %s (orphan)" % ep)
+                except Exception as e:
+                    log("[clean] pci remove %s err=%s" % (ep, e))
+            self.wait_for(lambda: not self._mhi0(), timeout=6.0)
+        return len(self._mhi0())
+
+    def hot_reset(self):
+        """半死状态先用 esoc 热复位（120~150ms 低脉冲，原定义），不切电"""
+        log("[reset] hot reset (esoc reset)")
+        try:
+            esoc_cmd("reset", timeout=15)
+        except EsocError as e:
+            log("[reset] aborted: %s" % e)
+            return "esoc-broken" if e.broken else "error"
+        def ok():
+            return len(self.table.node_services(3)) >= 8
+        if self.wait_for(ok, timeout=20.0):
+            log("[reset] services back: %d" % len(self.table.node_services(3)))
+            return "up"
+        if self.wait_for(self.is_clean, timeout=10.0):
+            log("[reset] back to clean")
+            return "clean"
+        log("[reset] still not clean: svcs=%d mhi0=%d loader=%d" %
+            (len(self.table.node_services(3)), len(self._mhi0()), len(self._loaders())))
+        return "dirty"
+
+    def clean_down(self):
+        """停 loader -> unbind MHI -> 断电 -> 等条件全满足（不再用长固定秒数）"""
+        if not self.stop_loaders():
+            log("[clean] loader still alive -> abort")
+            return False, "loader-alive"
+        if not self.wait_for(lambda: not self._mhi0(), timeout=8.0):
+            self.detach_mhi()
+        if self._mhi0():
+            log("[clean] mhi0 still bound -> abort")
+            return False, "mhi0-bound"
+        try:
+            esoc_cmd("pwr_off", timeout=15)
+            log("[clean] pwr_off sent")
+        except EsocError as e:
+            log("[clean] pwr_off aborted: %s" % e)
+            return False, ("esoc-broken" if e.broken else "pwr_off-failed")
+        ok = self.wait_for(self.is_clean, timeout=20.0)
+        if ok:
+            try:
+                subprocess.run(["/sbin/modprobe", "mhi_pci_generic"],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
+            except Exception:
+                pass
+            log("[clean] clean(条件满足) svcs=%d mhi0=%d loader=%d" %
+                (len(self.table.node_services(3)), len(self._mhi0()), len(self._loaders())))
+            return True, "clean"
+        log("[clean] not clean: svcs=%d mhi0=%d loader=%d" %
+            (len(self.table.node_services(3)), len(self._mhi0()), len(self._loaders())))
+        return False, "not-clean"
+
+    def bringup(self, reason):
+        if self.bringup_proc and self.bringup_proc.poll() is None:
+            return "already-running"
+        if esoc_broken_flag():
+            log("[bringup] skip reason=%s (esoc broken -> need host reboot)" % reason)
+            return "esoc-broken"
+        # 条件1：已经在 UP 且服务齐全 -> 不动
+        if self.state == "UP" and len(self.table.node_services(3)) >= 8:
+            return "up"
+        # 条件3：刚拉过且状态没变化 -> 防抖
+        if self.last_bringup and time.time() - self.last_bringup < 15:
+            return "debounce"
+        # 条件4：MHI 半死（枚举了但服务不上）-> 先试热复位，不切电；
+        #        SBL 说明已经在 Sahara，直接喂镜像，不复位
+        if self.state == "MHI" and not self.is_clean():
+            r = self.hot_reset()
+            if r == "up":
+                self.last_bringup = time.time()
+                return "up-after-reset"
+            if r != "clean":
+                self.last_bringup = time.time()   # 失败也退避，避免每 2s 反复打 reset
+                log("[bringup] hot reset insufficient -> skip (%s)" % r)
+                return "reset-failed"
+        # SBL 说明已经在 Sahara，直接按原流程喂镜像（boot.sh 自带原厂 cycle），不做 clean
+        if self.state == "SBL" and os.path.exists("/dev/mhi_pipe_2"):
+            self.last_bringup = time.time()
+            log("[bringup] reason=%s SBL->feed-only (no cycle)" % reason)
+            self.bringup_proc = self.spawn(["/bin/sh", FEED_SCRIPT], "bringup")
+            return "started"
+        ok, detail = self.clean_down()
+        if not ok:
+            log("[bringup] skip reason=%s (%s)" % (reason, detail))
+            return "not-clean"
+        self.last_bringup = time.time()
+        log("[bringup] reason=%s (clean ok)" % reason)
+        self.bringup_proc = self.spawn(["/bin/sh", BOOT_SCRIPT], "bringup")
+        return "started"
+
+    def handle_up(self):
+        if not self.up_handled:
+            self.up_handled = True
+            self.last_up = time.time()
+            self.stage = "online" if self.conf.get("online_on_up", "1") == "1" else "activate"
+            log("[up] node3 services=%d stage=%s" % (len(self.table.node_services(3)), self.stage))
+        if self.stage == "online":
+            if self.online_proc is None:
+                if self.find_proc("x50-online.sh"):
+                    self.stage = "activate"
+                else:
+                    self.online_proc = self.spawn(["/bin/sh", ONLINE_SCRIPT], "online")
+                    if self.online_proc is None:
+                        self.stage = "activate"
+            elif self.online_proc.poll() is not None:
+                self.online_proc = None
+                self.stage = "activate"
+        elif self.stage == "activate":
+            if self.conf.get("activate_on_up", "1") != "1" or self.find_proc("x50-uim-activate-safe.py"):
+                self.stage = "card"
+                return
+            if self.activate_proc is None:
+                self.activate_proc = self.spawn(["/usr/bin/python3", CARD_SCRIPT], "activate")
+                if self.activate_proc is None:
+                    self.stage = "card"
+            elif self.activate_proc.poll() is not None:
+                log("[activate] exited rc=%s" % self.activate_proc.returncode)
+                self.activate_proc = None
+                self.stage = "card"
+        elif self.stage == "card":
+            if self.conf.get("card_monitor", "1") != "1":
+                self.stage = "done"
+                return
+            if self.find_proc("x50-uim-activate-safe.py --monitor"):
+                self.stage = "done"
+                return
+            if self.card_proc is None or self.card_proc.poll() is not None:
+                self.card_proc = self.spawn(["/usr/bin/python3", CARD_SCRIPT, "--monitor"], "card")
+            self.stage = "done"
+
+    def tick(self):
+        st = self.probe_state()
+        now = time.time()
+        if st != self.state:
+            log("[state] %s -> %s uptime=%ds" % (self.state, st, now - self.state_since))
+            self.state = st
+            self.state_since = now
+            if st == "DOWN":
+                self.down_since = now
+                self.up_handled = False
+                self.stage = "idle"
+            elif st != "DOWN":
+                self.down_since = None
+        if st == "UP":
+            self.handle_up()
+        elif st == "DOWN":
+            if self.down_since is None:
+                self.down_since = now
+            if self.conf.get("autostart", "1") == "1":
+                # 条件：boot 已过 startup_grace 且 DOWN 稳定 >=3s 且真的干净
+                if (now - self.boot_ts >= float(self.conf.get("startup_grace", "60"))
+                        and now - self.down_since >= 3):
+                    self.bringup("down stable")
+        elif st in ("SBL", "MHI"):
+            # 条件：卡在 SBL/MHI 超过 20s 且没有 loader 在跑（loader 在跑说明正在喂镜像，不打扰）
+            # 只要没有 bringup 在跑就允许处理（bringup 内部会判断 already-running）
+            if now - self.state_since >= 20 and self.bringup_proc is None:
+                self.bringup("stuck %s" % st)
+        # 子进程回收
+        for attr in ("bringup_proc", "online_proc", "activate_proc", "card_proc"):
+            p = getattr(self, attr)
+            if p is not None and p.poll() is not None:
+                log("[%s] exited rc=%s" % (attr, p.returncode))
+                setattr(self, attr, None)
+
+    def run(self):
+        self.load_conf()
+        log("[supervise] start conf=%s" % json.dumps(self.conf))
+        time.sleep(2)
+        if esoc_broken_flag():
+            if "previous command is still running" in dmesg_tail(400):
+                log("[startup] esoc broken flag kept (driver still busy)")
+            else:
+                clear_esoc_broken()
+                log("[startup] esoc broken flag cleared (driver clean after reboot)")
+        if self.probe_state() == "UP":
+            self.state = "UP"
+            self.state_since = time.time()
+            self.up_handled = True
+            self.stage = "done"
+            log("[supervise] adopt existing UP state (node3 services=%d)" % len(self.table.node_services(3)))
+        while not self.stop:
+            try:
+                self.tick()
+            except EsocError as e:
+                log("[supervise] esoc error: %s" % e)
+            except Exception as e:
+                log("[supervise] tick error: %s: %s" % (type(e).__name__, e))
+                log("[supervise] traceback:\n%s" % traceback.format_exc())
+            time.sleep(2)
+
+    def start(self):
+        t = threading.Thread(target=self.run, name="sup", daemon=True)
+        t.start()
+        return t
+
+    def info(self):
+        return {
+            "state": self.state,
+            "stage": self.stage,
+            "state_age_s": int(time.time() - self.state_since),
+            "x50_services": len(self.table.node_services(3)),
+            "bringup_running": bool(self.bringup_proc and self.bringup_proc.poll() is None),
+            "online_running": bool(self.online_proc and self.online_proc.poll() is None),
+            "card_running": bool(self.card_proc and self.card_proc.poll() is None),
+            "last_bringup_age_s": int(time.time() - self.last_bringup) if self.last_bringup else None,
+            "last_up_age_s": int(time.time() - self.last_up) if self.last_up else None,
+            "conf": self.conf,
+        }
+
+
+# ---------------- raise: 按原厂 RIL 顺序抬起 node0 内建 modem ----------------
+# 原厂顺序(libril-qc-hal-qmi.so 实证)：
+#   wait DMS up -> WAITING_FOR_CARD_STATUS -> SETTING_CARD_STATUS -> CARD_STATUS_SET
+#   -> SETTING_OP_MODE -> OP_MODE_SET -> DONE
+# 铁律：卡没到 ready，不允许写 operating mode。
+
+def sh(cmd, timeout=30):
+    try:
+        p = subprocess.run(["/bin/sh", "-c", cmd], stdout=subprocess.PIPE,
+                           stderr=subprocess.STDOUT, timeout=timeout)
+        return p.returncode, p.stdout.decode("utf-8", "replace")
+    except subprocess.TimeoutExpired:
+        return 124, "timeout"
+    except Exception as e:
+        return 125, str(e)
+
+
+def qmi(node, args, timeout=25):
+    return sh("timeout %d qmicli -d qrtr://%d %s" % (timeout, node, args), timeout + 5)
+
+
+def parse_card_status(text):
+    slots = []
+    cur = None
+    for ln in text.splitlines():
+        s = ln.strip()
+        m = re.match(r"Slot \[(\d+)\]", s)
+        if m:
+            cur = {"slot": int(m.group(1)), "state": None,
+                   "app_state": None, "pin1": None}
+            slots.append(cur)
+            continue
+        if cur is None:
+            continue
+        m = re.match(r"Card state: '([^']*)'", s)
+        if m:
+            cur["state"] = m.group(1)
+            continue
+        m = re.match(r"Application state: '([^']*)'", s)
+        if m:
+            cur["app_state"] = m.group(1)
+            continue
+        m = re.match(r"PIN1 state: '([^']*)'", s)
+        if m:
+            cur["pin1"] = m.group(1)
+    return slots
+
+
+def read_card_status(node=0):
+    rc, out = qmi(node, "--uim-get-card-status")
+    return rc, out, parse_card_status(out)
+
+
+def raise_modem(node=0, wait_dms=90, do_online=True):
+    log("raise: start node%d wait_dms=%d online=%s" % (node, wait_dms, do_online))
+
+    t0 = time.time()
+    while time.time() - t0 < wait_dms:
+        rc, out = sh("modem-mgr list --node %d --service 2" % node, 20)
+        if "service2 " in out:
+            log("raise: node%d DMS(2) advertised after %ds" % (node, int(time.time() - t0)))
+            break
+        time.sleep(3)
+    else:
+        log("raise: ABORT node%d DMS(2) not advertised in %ds" % (node, wait_dms))
+        return {"result": "no-dms"}
+
+    rc, out, slots = read_card_status(node)
+    present = [s for s in slots if s.get("state") == "present"]
+    log("raise: slots=%s present=%s" % (json.dumps(slots), [s["slot"] for s in present]))
+    if not present:
+        log("raise: ABORT no card present (vendor rule: card status before op mode)")
+        return {"result": "no-card", "slots": slots}
+
+    cur = present[0]
+    if cur.get("app_state") != "ready":
+        log("raise: slot%d app=%s pin1=%s -> activate provisioning session"
+            % (cur["slot"], cur.get("app_state"), cur.get("pin1")))
+        rc, out = qmi(node, "--uim-change-provisioning-session="
+                            "session-type=primary-gw-provisioning,activate=yes,slot=%d"
+                      % cur["slot"], 35)
+        log("raise: prov rc=%d %s" % (rc, out.strip().replace("\n", " | ")[:300]))
+        time.sleep(5)
+        rc, out, slots = read_card_status(node)
+        present = [s for s in slots if s.get("state") == "present"]
+        if not present or present[0].get("app_state") != "ready":
+            log("raise: ABORT card not ready after provisioning: %s" % json.dumps(slots))
+            return {"result": "card-not-ready", "slots": slots}
+        cur = present[0]
+
+    log("raise: card ready slot%d app=%s" % (cur["slot"], cur.get("app_state")))
+    if not do_online:
+        return {"result": "card-ready", "slots": slots}
+
+    rc, out = qmi(node, "--dms-set-operating-mode=online", 30)
+    log("raise: set online rc=%d %s" % (rc, out.strip().replace("\n", " | ")[:200]))
+    time.sleep(3)
+    rc, out = qmi(node, "--dms-get-operating-mode", 20)
+    log("raise: mode now %s" % out.strip().replace("\n", " | ")[:120])
+    ok = "online" in out
+    return {"result": "online" if ok else "online-failed",
+            "mode": out.strip()[:200], "slots": slots}
+
+
+# ---------------- daemon ----------------
+
+class Server:
+    def __init__(self):
+        self.table = NsTable()
+        self.sup = Supervisor(self.table)
+        self.locks = {}
+        self.lock_guard = threading.Lock()
+
+    def key_lock(self, key):
+        with self.lock_guard:
+            if key not in self.locks:
+                self.locks[key] = threading.Lock()
+            return self.locks[key]
+
+    def handle(self, req):
+        op = req.get("op")
+        if op == "status":
+            snap = self.table.snapshot()
+            out = {"nodes": {}, "domains": {}, "supervisor": self.sup.info()}
+            for n in sorted({k[0] for k in snap}):
+                out["nodes"][str(n)] = len({k[1] for k in snap if k[0] == n})
+            for name, (node, allowed) in DOMAINS.items():
+                svcs = self.table.node_services(node)
+                out["domains"][name] = {
+                    "node": node,
+                    "alive": bool(svcs),
+                    "services": svcs,
+                    "missing": sorted(allowed - set(svcs)) if allowed else [],
+                }
+            return out
+        if op == "state":
+            return self.sup.info()
+        if op == "bringup":
+            return {"bringup": self.sup.bringup("manual")}
+        if op == "list":
+            node = req.get("node")
+            svc = req.get("service")
+            rows = []
+            for (n, s, i), port in sorted(self.table.snapshot().items()):
+                if node is not None and n != node:
+                    continue
+                if svc is not None and s != svc:
+                    continue
+                rows.append({"node": n, "service": s, "instance": i >> 8, "port": port,
+                             "name": svc_name(s), "provider": svc_provider(n, s)})
+            return {"servers": rows}
+        if op == "send":
+            node = int(req["node"])
+            service = int(req["service"])
+            msg = int(str(req["msg"]), 16) if isinstance(req["msg"], str) else int(req["msg"])
+            tlv = bytes.fromhex(req.get("tlv") or "")
+            timeout = float(req.get("timeout", 8))
+            with self.key_lock((node, service)):
+                r = qmi_call(self.table, node, service, msg, tlv, timeout)
+            out = {"error": r.get("error"), "node": node, "service": service,
+                   "port": r.get("port"), "result": None, "tlvs": []}
+            res = tlv_ok(r.get("tlvs") or [])
+            if res:
+                out["result"] = {"result": res[0], "error": res[1]}
+            for t, v in r.get("tlvs") or []:
+                out["tlvs"].append({"type": t, "value": v.hex()})
+            return out
+        return {"error": "unknown-op"}
+
+    def serve(self):
+        self.table.start()
+        self.sup.start()
+        if os.path.exists(SOCK_PATH):
+            os.unlink(SOCK_PATH)
+        srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        srv.bind(SOCK_PATH)
+        os.chmod(SOCK_PATH, 0o666)
+        srv.listen(16)
+        while True:
+            c, _ = srv.accept()
+            threading.Thread(target=self.client, args=(c,), daemon=True).start()
+
+    def client(self, c):
+        f = c.makefile("rwb")
+        try:
+            line = f.readline()
+            if not line:
+                return
+            req = json.loads(line)
+            resp = self.handle(req)
+            f.write((json.dumps(resp) + "\n").encode())
+            f.flush()
+        except Exception as e:
+            try:
+                f.write((json.dumps({"error": "exception:%s" % e}) + "\n").encode())
+                f.flush()
+            except Exception:
+                pass
+        finally:
+            try:
+                c.close()
+            except Exception:
+                pass
+
+
+# ---------------- CLI ----------------
+
+def rpc(req, timeout=60):
+    try:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(timeout)
+        s.connect(SOCK_PATH)
+        s.sendall((json.dumps(req) + "\n").encode())
+        buf = b""
+        while not buf.endswith(b"\n"):
+            chunk = s.recv(65536)
+            if not chunk:
+                break
+            buf += chunk
+        s.close()
+        return json.loads(buf)
+    except (FileNotFoundError, ConnectionRefusedError):
+        return {"error": "daemon-not-running"}
+
+
+def cli(argv):
+    if len(argv) < 2:
+        print(__doc__ or "usage: modem-mgr daemon|status|state|bringup|list|send|watch")
+        return 1
+    cmd = argv[1]
+    if cmd == "daemon":
+        Server().serve()
+        return 0
+    if cmd in ("status", "state"):
+        r = rpc({"op": "status" if cmd == "status" else "state"})
+        if r.get("error"):
+            print(r["error"])
+            return 1
+        print(json.dumps(r, indent=2))
+        return 0
+    if cmd == "bringup":
+        r = rpc({"op": "bringup"})
+        print(json.dumps(r))
+        return 0 if r.get("bringup") in ("started", "already-running", "cooldown") else 1
+    if cmd == "list":
+        req = {"op": "list"}
+        i = 2
+        while i < len(argv):
+            if argv[i] == "--node":
+                req["node"] = int(argv[i + 1]); i += 2
+            elif argv[i] == "--service":
+                req["service"] = int(argv[i + 1]); i += 2
+            else:
+                i += 1
+        r = rpc(req)
+        if r.get("error"):
+            print(r["error"])
+            return 1
+        for row in r["servers"]:
+            print("node%-3d svc%-5d %-16s inst%-5d port%-4d %s" %
+                  (row["node"], row["service"], row.get("name", "?"),
+                   row["instance"], row["port"], row.get("provider", "?")))
+        return 0
+    if cmd == "send":
+        if len(argv) < 5:
+            print("usage: modem-mgr send <node> <service> <msg_hex> [tlv_hex] [timeout]")
+            return 1
+        req = {"op": "send", "node": int(argv[2]), "service": int(argv[3]),
+               "msg": argv[4], "tlv": argv[5] if len(argv) > 5 else "",
+               "timeout": argv[6] if len(argv) > 6 else 8}
+        r = rpc(req, timeout=float(req["timeout"]) + 15)
+        if r.get("error"):
+            print("error:", r["error"], "node=%s svc=%s" % (r.get("node"), r.get("service")))
+            return 2
+        print("node%d svc%d port%s result=%s" %
+              (r["node"], r["service"], r.get("port"),
+               r.get("result") or "no-result-tlv"))
+        for t in r["tlvs"]:
+            print("  TLV 0x%02x %s" % (t["type"], t["value"]))
+        return 0
+    if cmd == "raise":
+        node = int(argv[2]) if len(argv) > 2 and not argv[2].startswith("-") else 0
+        do_online = "--no-online" not in argv
+        r = raise_modem(node, do_online=do_online)
+        print(json.dumps(r, indent=2, ensure_ascii=False))
+        return 0 if r.get("result") in ("online", "card-ready") else 1
+    if cmd == "watch":
+        secs = float(argv[2]) if len(argv) > 2 else 30
+        t = NsTable()
+        t.start()
+        t0 = time.time()
+        seen = {}
+        while time.time() - t0 < secs:
+            snap = t.snapshot()
+            for k in sorted(set(snap) - set(seen)):
+                print("+ node%-3d svc%-5d %-16s inst%-5d port%-4d %s" %
+                      (k[0], k[1], svc_name(k[1]), k[2] >> 8, snap[k], svc_provider(k[0], k[1])))
+            for k in sorted(set(seen) - set(snap)):
+                print("- node%-3d svc%-5d %-16s inst%-5d %s" %
+                      (k[0], k[1], svc_name(k[1]), k[2] >> 8, svc_provider(k[0], k[1])))
+            seen = snap
+            time.sleep(1)
+        return 0
+    print("unknown command", cmd)
+    return 1
+
+
+if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == "ns-worker":
+        ns_worker_main()
+        sys.exit(0)
+    sys.exit(cli(sys.argv))

@@ -1,0 +1,120 @@
+#!/usr/bin/env python3
+"""x50-efs — IRIS/EFS access over Xiaomi private QMI service (node0 svc 65508 msg 2).
+
+usage:
+  x50-efs read  <path> [-o FILE]
+  x50-efs write <path> <hexdata|@FILE>
+  x50-efs delete <path>
+  x50-efs info  <path>
+"""
+import re, subprocess, sys, struct, os
+
+NODE = 0
+SVC = 65508
+MSG = "0002"
+TIMEOUT = "6"
+
+
+def build_tlv(cmd, path, data=b"", sub_id=0):
+    p = path.encode() + b"\x00"
+    if len(p) > 71:
+        raise SystemExit("path too long (max 70 chars)")
+    if len(data) > 364:
+        raise SystemExit("data too long (max 364 bytes)")
+    body = struct.pack("<IIII", cmd, sub_id, 0, len(p))
+    body += p.ljust(72, b"\x00")
+    body += struct.pack("<I", len(data)) + data.ljust(368, b"\x00")
+    arr = body.ljust(512, b"\x00")
+    t = "01" + "0400" + struct.pack("<I", 2).hex()
+    t += "02" + "0400" + struct.pack("<I", len(body)).hex()
+    t += "10" + "0002" + arr.hex()
+    return t
+
+
+def send(tlv, timeout=TIMEOUT):
+    try:
+        p = subprocess.run(["modem-mgr", "send", str(NODE), str(SVC), MSG, tlv, timeout],
+                           capture_output=True, text=True, timeout=float(timeout) + 30)
+        out = (p.stdout or "") + (p.stderr or "")
+    except subprocess.TimeoutExpired:
+        raise SystemExit("modem-mgr timeout (daemon stuck?)")
+    if "service-not-advertised" in out:
+        raise SystemExit("service not advertised (wait ~30s after modem-mgr restart)")
+    if os.environ.get("X50EFS_DEBUG"):
+        print(out, file=sys.stderr)
+    res = {"result": None, "const": None, "buf": b"", "raw": out}
+    for m in re.finditer(r"TLV 0x([0-9a-f]{2}) ([0-9a-f]+)", out):
+        tid, val = m.group(1), bytes.fromhex(m.group(2))
+        if tid == "01" and len(val) >= 4:
+            res["result"] = struct.unpack("<I", val[:4])[0]
+        elif tid == "02" and len(val) >= 4:
+            res["const"] = struct.unpack("<I", val[:4])[0]
+        elif tid == "10":
+            res["buf"] = val
+    return res
+
+
+def decode_resp(buf):
+    if len(buf) < 12:
+        return None, b""
+    cmd, sub_id, blen = struct.unpack("<III", buf[:12])
+    blen = min(blen, len(buf) - 12)
+    return {"cmd": cmd, "sub_id": sub_id, "len": blen}, buf[12:12 + blen]
+
+
+def do_read(path, out=None):
+    r = send(build_tlv(4, path))
+    if r["result"] != 0:
+        print("read failed: result=%s (1 = not found)" % r["result"])
+        return 1
+    meta, data = decode_resp(r["buf"])
+    if meta is None:
+        print("bad response"); return 1
+    print("path=%s len=%d" % (path, meta["len"]))
+    if out:
+        open(out, "wb").write(data)
+        print("saved -> %s" % out)
+    else:
+        print(data.hex())
+    return 0
+
+
+def do_write(path, arg):
+    if arg.startswith("@"):
+        data = open(arg[1:], "rb").read()
+    else:
+        data = bytes.fromhex(arg)
+    r = send(build_tlv(5, path, data))
+    ok = r["result"] == 0
+    print("write %s: result=%s len=%d" % (path, r["result"], len(data)))
+    return 0 if ok else 1
+
+
+def do_delete(path):
+    r = send(build_tlv(6, path))
+    print("delete %s: result=%s" % (path, r["result"]))
+    return 0 if r["result"] == 0 else 1
+
+
+def main(argv):
+    if len(argv) < 3:
+        print(__doc__); return 2
+    op, path = argv[1], argv[2]
+    if op == "read":
+        out = argv[4] if len(argv) > 4 and argv[3] == "-o" else None
+        return do_read(path, out)
+    if op == "write":
+        if len(argv) < 4:
+            print("write needs data"); return 2
+        return do_write(path, argv[3])
+    if op == "delete":
+        return do_delete(path)
+    if op == "info":
+        r = send(build_tlv(4, path))
+        print("result=%s const=%s buflen=%d" % (r["result"], r["const"], len(r["buf"])))
+        return 0
+    print(__doc__); return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

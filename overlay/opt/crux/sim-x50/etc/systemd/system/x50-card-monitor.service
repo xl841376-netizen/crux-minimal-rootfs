@@ -1,0 +1,14 @@
+[Unit]
+Description=X50 SIM card event monitor (passive, event-driven retry)
+After=x50-uim-activate.service
+Wants=x50-uim-activate.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/local/sbin/x50-uim-activate-safe.py --monitor
+Restart=on-failure
+RestartSec=60
+Nice=10
+
+[Install]
+WantedBy=multi-user.target

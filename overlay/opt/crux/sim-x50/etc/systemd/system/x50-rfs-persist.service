@@ -1,0 +1,12 @@
+[Unit]
+Description=X50 RFS readwrite root -> persist (/rfs/mdm/mpss), Android-aligned
+After=local-fs.target
+Before=tqftpserv.service tqftpserv-v3.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/x50-rfs-persist.sh
+
+[Install]
+WantedBy=multi-user.target

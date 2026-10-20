@@ -1,0 +1,20 @@
+[Unit]
+Description=crux: power off external X50 (SDX50M) modem before shutdown/reboot
+Documentation=file:/root/x50mods/deploy/crux-x50-poweroff.sh
+DefaultDependencies=no
+Before=shutdown.target umount.target
+After=multi-user.target network.target
+Conflicts=reboot.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# 常驻：开机时不做任何事；关机/重启时（unit 被 stop）执行 ExecStop
+ExecStart=/bin/true
+ExecStop=/usr/local/sbin/crux-x50-poweroff.sh
+TimeoutStopSec=25
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

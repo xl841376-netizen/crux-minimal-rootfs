@@ -52,6 +52,7 @@
 | `modem-mnt.service` | 把 modem(NON-HLOS) 分区只读挂到 `/mnt/mdmpart`，并把 `image/modem_pr` 链到固件目录（tqftpserv 用） | ✅ |
 | `crux-kmsg-tap.service` / `dmesg-snap.service` / `power-snap.service` | 内核日志落盘 / dmesg 尾部快照 / 电源状态快照（全是排障用，常驻） | ✅ |
 | `/etc/crux-swap.conf` | 交换空间开关（不是 unit）：`LROOT_SWAP=0` 默认只 zram；`=1` 才在 `/mnt/lroot` 上建 8G swapfile | — |
+| `/usr/local/sbin/crux-sim-x50` + `/etc/crux-sim.conf` | SIM/X50 开关（不是 unit）：整套外挂 X50 的东西放在 `/opt/crux/sim-x50/`，**默认不安装**；`enable` 才铺回系统路径 | — |
 
 ### 2.2 用户态程序（`overlay/usr/local/`）
 
@@ -102,6 +103,24 @@
 | `crux-gpu-iface` / `crux-touch-watchdog` | `10-crux-fast-stop.conf` | `TimeoutStopSec=2s` + `KillMode=control-group` |
 
 少了这些，关机时会白等满 90 秒。
+
+### 2.7 SIM / 外挂 X50（sdx50m）—— 整套保留，默认不安装
+
+外挂 X50 基带（SIM 侧）那一套在设备上已存在但尚未定型，这里**原样保留**，但不参与默认启动：
+
+| 项 | 说明 |
+|---|---|
+| 存放位置 | `overlay/opt/crux/sim-x50/` —— 按**系统绝对路径镜像**存放（`etc/systemd/system/…`、`usr/local/bin/…`），套用 overlay 后落在 `/opt/crux/sim-x50/`，**不生效** |
+| 内容（70 个文件） | 15 个单元（`x50-modem-boot` / `x50-online` / `x50-qmi-l4` / `x50-qmi-l5` / `x50-card-monitor` / `x50-liveness` / `x50-efs-sync` / `x50-gen3` / `x50-pdc` / `x50-rfs-persist` / `x50-uim-prepare` / `x50-uim-activate` / `modem-mgr` / `tqftpserv-v3` / `crux-x50-poweroff`）+ 13 个 drop-in + 30 个程序（`x50-modem-loader`、`x50-qmi-*`、`x50-pdc-*`、`mdm_helper_native`、`mhi_efs_sync`、`pm_service_native`、`qmisd`、`q2*/q5*/qmi/qraw` 等调试脚本）+ 3 条 udev 规则（`77-mm-x50-efs` / `77-mm-x50-fusion` / `99-x50-nopm`）+ 2 个 modprobe 参数（`x50-mhi.conf` / `ipa_mhi_proxy.conf`） |
+| 开关 | `/etc/crux-sim.conf` 的 `SIM_X50_ENABLE`（**默认 0**） |
+| 打开 | `crux-sim-x50 enable` → 铺回系统路径 + `udevadm control --reload-rules` + `daemon-reload` + enable 全部单元；之后 `systemctl start x50-modem-boot` 或直接重启 |
+| 关闭 | `crux-sim-x50 disable` → 停掉并 disable 全部单元 + 从系统路径移除文件（`/opt` 下副本保留） |
+| 查看 | `crux-sim-x50 status` |
+
+**默认不安装的原因**：X50 那条链（MHI → IPA → QMI → UIM provisioning session `0x38`）目前还没跑通，
+曾出现过“做 QMI 操作把整机拖死”的情况。默认状态下参与基带的只有**内置四个子系统**
+（`mpss` / `adsp` / `cdsp` / `slpi`，由 `qcom-subsys-start` 拉起），SIM 侧完全不介入——
+`qcom-subsys-start.service` 里也已去掉 `x50-rfs-persist` 那个依赖。
 
 ---
 

@@ -1,0 +1,13 @@
+[Unit]
+Description=QRTR TFTP service (X50, instance 3)
+After=qrtr-ns.service pd-mapper.service
+Wants=qrtr-ns.service
+
+[Service]
+ExecStart=/usr/local/bin/tqftpserv -v3 -d
+Restart=always
+RestartSec=1
+TimeoutStopSec=5s
+
+[Install]
+WantedBy=multi-user.target
