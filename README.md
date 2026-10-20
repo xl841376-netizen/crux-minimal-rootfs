@@ -1,101 +1,211 @@
-# crux 最小 rootfs（设备适配层）
+# crux 最小 rootfs（Xiaomi Mi 9 Pro 5G / SM8150）
 
-> **Xiaomi Mi 9 Pro 5G（crux / SM8150）** 主线 Linux 用的**最小 rootfs 包**：
-> 一份 Ubuntu 基础系统 + 针对该设备适配过的**全部用户态文件、systemd 服务和内核模块**。
->
-> 导出时间：**2026-10-20**（取自设备当前实际运行的 rootfs：Ubuntu 26.04.1，内核 7.3.0-rc5-crux73）
+> 主线 Linux（7.3）跑这台机器用的**最小可开机 rootfs**：一份 Ubuntu 基础系统 + 本机适配层 + 各子系统要的用户态配套。
+> 整理时间：**2026-10-20**（取自设备实际运行的 rootfs：Ubuntu 26.04.1 LTS `resolute`，内核 `7.3.0-rc5-crux73`）
+> **本仓库不含可刷写的系统本体**：系统（Ubuntu 本体）请自己下官方的，本仓库只提供“装好系统之后要叠上去的那一层”。
 
 ---
 
-## 1. 这个仓库是什么
+## 1. 这份东西分成三层，别混着看
+
+| 层 | 是什么 | 从哪来 | 在本仓库里？ |
+|---|---|---|---|
+| **L0 基础系统** | Ubuntu 26.04.1 aarch64 本体（systemd、udev、dbus、kmod、apt、openssh、sudo、python3…） | 官方/最小系统镜像 | ❌ 不含（要自己下 Ubuntu rootfs） |
+| **L1 基础系统上的“必备包”** | 各子系统靠它们跑起来的通用软件包，见 §4 每行的“基础包”列 | `apt install` | ❌ 不含（`build.sh` 里有清单，或用 §3 装好后补装） |
+| **L2 设备适配层** | 本仓库 `overlay/`：systemd 单元、设备脚本、udev 规则、modprobe 参数、sysctl、UCM、WirePlumber 规则 | 本机实测整理 | ✅ 全部在这里 |
+| **L3 子系统专属用户态** | `npu`/`npuctl`/`npu-svc`、`hexagonrpcd` + `libhexagonrpc`/`libqrtr`、`rmtfs`/`tqftpserv`/`pd-mapper` 等**设备专用二进制** | 从设备/上游编出来的 | ✅ 在 `overlay/usr/local/` |
+| — | 内核模块 | 内核源码树编译 | ✅ 在 `modules/` |
+
+> 要点：**L0/L1 是“任何 Ubuntu 都有的东西”，L2/L3 才是“这台机器的东西”**。
+> 换设备时只该换 L2/L3；升级系统只涉及 L0/L1。
+
+---
+
+## 2. 仓库结构
 
 | 路径 | 内容 |
 |---|---|
-| `overlay/` | **设备适配层**：按 rootfs 绝对路径存放（`usr/…`、`etc/…`），直接覆盖到根即可 |
-| `modules/` | 设备专用 out-of-tree 内核模块（安装时放进 `/usr/lib/modules/<kver>/extra/`） |
-| `build.sh` | 从 Ubuntu 最小系统重建完整 rootfs：debootstrap → 套用 overlay → 装模块 → 启用服务 |
+| `overlay/` | **设备适配层 + 子系统专属用户态**，按 rootfs 绝对路径存放，直接覆盖到根即可 |
+| `modules/` | 设备专用 out-of-tree 内核模块（装到 `/usr/lib/modules/<kver>/extra/`） |
+| `build.sh` | 从 Ubuntu 最小系统重建（debootstrap → 套 overlay → 装模块 → 启用服务）。**只是备选路径**，正常装机用 §3 |
 | `MANIFEST.txt` | 全部文件的路径 + sha256 |
 
-**不包含**（有意排除）：任何私钥（`/root/.ssh/*`、SSH 主机密钥）、无线网络凭据（NM/netplan 里的 PSK）、`/root` 私人材料、日志、Docker 镜像、桌面套件本体（KDE 属于基础系统，不在适配层里）。
+**有意排除**：任何私钥（`/root/.ssh/*`、SSH 主机密钥）、无线凭据（NM profile 里的 PSK）、`/root` 私人材料、日志、固件二进制（`/lib/firmware` 太大，装机后从设备/刷机包取）。
 
 ---
 
-## 2. 适配层清单
+## 3. 怎么装
 
-### 2.1 服务（systemd 单元，`overlay/etc/systemd/system/`）
+三步：**① 新建一个分区 → ② 把 Ubuntu 官方的 rootfs 写进去 → ③ 把本仓库的适配层叠上去。**
+
+> 说明：本仓库**不提供系统镜像**。第②步下的是 Ubuntu 官方 aarch64 rootfs（或官方镜像），
+> 第③步才是“这台机器专用的那部分”。
+
+### ① 新建分区
+
+```bash
+# 示例：在 /dev/sda 上开一个 24G 分区
+sudo sgdisk -n 0:0:+24G -t 0:8300 -c 0:cruxroot /dev/sda
+sudo mkfs.ext4 -L cruxroot /dev/sda38          # 分区号以实际为准
+sudo mount /dev/sda38 /mnt
+```
+
+### ② 下载 Ubuntu 官方 rootfs 并写入这个分区
+
+```bash
+# 官方 aarch64 基础系统（选与设备匹配的版本；这里以 26.04/resolute 为例）
+#   https://cdimage.ubuntu.com/ubuntu-base/releases/
+#   ubuntu-base-26.04-base-arm64.tar.gz
+sudo tar xzf ubuntu-base-26.04-base-arm64.tar.gz -C /mnt
+```
+
+（如果你手上是 Ubuntu 官方的 arm64 整盘镜像，也可以直接 `dd if=…img of=/dev/sda38 bs=4M status=progress`，
+但那样会连官方的分区表一起写进去，注意别盖到 ESP。）
+
+### ③ 叠加本仓库的适配层
+
+```bash
+cd crux-minimal-rootfs
+sudo tar -C /mnt -cf - --exclude='*.bak*' -C overlay . | sudo tar -C /mnt -xf -
+sudo mkdir -p /mnt/usr/lib/modules/$(uname -r)/extra
+sudo cp modules/*.ko /mnt/usr/lib/modules/$(uname -r)/extra/
+```
+
+然后启用本机服务（只列基础那条链，SIM/X50 不在内）：
+
+```bash
+for u in rmtfs tqftpserv pd-mapper hexagonrpcd-sdsp crux-ssc-registry iris-vpu npu-svc \
+         crux-fastrpc-guard crux-touch-watchdog usb-gadget-acm usb-align qsee-supplicant \
+         modem-mnt qcom-subsys-start crux-audio-route crux-time-sync crux-swap \
+         crux-ufs-stable ufs-nopm crux-charger-init crux-crashsave crux-markshutdown \
+         crux-kmsg-tap dmesg-snap power-snap; do
+  sudo systemctl --root=/mnt enable $u.service
+done
+for t in crux-time-sync.timer qcom-subsys-start.timer; do
+  sudo systemctl --root=/mnt enable $t
+done
+```
+
+### ④ 两处必须对上的地方
+
+1. **`/mnt/etc/fstab`**：`UUID=$(blkid -s UUID -o value /dev/sda38) / ext4 defaults,noatime 0 1`
+2. **ESP 上的 `EFI/crux/grub.cfg`**：`linux (…)/EFI/crux/Image74 … root=UUID=<同一个> rootwait`
+
+### ⑤ 首次开机补 L1 必备包（见 §4 的“基础包”列）
+
+```bash
+sudo apt install --no-install-recommends \
+  network-manager wpasupplicant rfkill iw modemmanager libqmi-utils libmbim-utils \
+  alsa-ucm-conf alsa-utils libasound2t64 \
+  pipewire pipewire-pulse pipewire-alsa wireplumber \
+  gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
+  gstreamer1.0-plugins-bad gstreamer1.0-alsa gstreamer1.0-pipewire \
+  openssh-server sudo python3 v4l-utils
+```
+
+再把 `/lib/firmware` 补齐（`qcom/sm8150/xiaomi/crux/*.mbn`、`qcom/sdx50m/*`、`ath10k/WCN3990/hw1.0/*`、`regulatory.db`），
+来源是设备原厂分区或官方刷机包。
+
+---
+
+## 4. 各子系统的配套（基础包 + 本机适配 + 状态）
+
+“基础包”= L1，`apt` 装；“适配”= 本仓库 overlay 提供。
+
+| 子系统 | 基础包（L1） | 本包提供的适配（L2/L3） | 机内其它需要 | 状态 |
+|---|---|---|---|---|
+| **显示 / GPU** | `mesa-*`、`libdrm-*`、`libgl1`、`libvulkan1` | `crux-display/te-sync`（内核侧）、`crux-gpu-iface.service`（把 GPU 统计暴露为标准 DRM 接口） | 固件 `qcom/a640_gmu.bin`、`qcom/a630_sqe.fw`、`a640_zap.mbn`（内核内嵌或 `/lib/firmware`） | ✅ 可用 |
+| **触摸** | `libinput`、桌面栈 | `crux-touch-watchdog.service`（周期体检 + 自恢复） | 固件 `ftm5_fw.ftb`；`fts` 驱动 | ✅ 可用 |
+| **UFS 存储** | `e2fsprogs`、`dosfstools` | `crux-ufs-stable.service`（标准 sysfs：`auto_hibern8=0`、LUN `power/control=on`）+ `ufs-nopm.service`（QCOM 私有 `rpm_lvl`/`clkgate_enable`/`clkscale_enable=0`）+ `90-ufs-writeback.conf` | — | ✅ 可用 |
+| **WiFi（WCN3990）** | `network-manager`、`wpasupplicant`、`rfkill`、`iw` | `modules-load.d/crux-wifi.conf`（`ath10k_snoc`）、`ath10k` 日志降级 | 固件 `ath10k/WCN3990/hw1.0/*` + `qcom/sm8150/xiaomi/crux/wlanmdsp.mbn`；`regulatory.db`；`cfg80211.ieee80211_regdom=CN` | ✅ 可用（有自复位噪声，见 §6） |
+| **音频** | `alsa-ucm-conf`、`alsa-utils`、`libasound2t64`、`pipewire`+`pipewire-pulse`+`pipewire-alsa`、`wireplumber` | `ucm2/conf.d/sm8150/{sm8150,HiFi}.conf`、`wireplumber.conf.d/{51-crux-fmt,52-crux-noproaudio}.conf`、`crux-audio-route.service` | 内核 dts `&sound { model = "… sm8150" }`（决定卡 id）、ADSP 起来（`adsp.mbn`） | ✅ 可用（Speaker + Earpiece） |
+| **NPU** | `python3` | `npu`、`npuctl`、`npu-svc`、`npu-boot.service`、`npu-svc.service`、模块 `msm_qmp.ko`、`npu_boot24.ko`、`modules-load.d/msm_qmp.conf` | 固件 `npu.mdt`/`npu.b*`；`/dev/msm_npu` | ✅ 可用（InceptionV3 已跑通） |
+| **传感器（SSC/SLPI）** | `python3` | `hexagonrpcd` + `libhexagonrpc.so.0.5`、`libqrtr.so.1.2`、`chrecd`、`resources*`、`ssccli`、`sscregistrygen`、`crux-ssc-registry.service`、`crux-fastrpc-guard.service`、`crux-sensor-adapt.service`、`wait-dsp-ready.sh` | 固件 `slpi.mbn`；`/dev/fastrpc-*` | ✅ 可用 |
+| **视频编解码（iris/VPU）** | `gstreamer1.0-*`、`v4l-utils` | `iris-vpu.service`、`99-qcom-iris-dmaheap.rules`（`dma_heap/system` 0666，Chrome 硬解需要）、`modprobe.d/99-qcom-iris.conf`（`cached_capture=1`）、`blacklist-crux-video.conf`（说明性） | 固件 `venus.mbn` | ✅ 可用 |
+| **内置基带（mpss）** | `modemmanager`、`libqmi-utils`、`libmbim-utils` | `rmtfs`/`tqftpserv`/`pd-mapper`（L3 二进制 + 单元）、`modem-mnt.service`（挂 modem 分区、链 `image/modem_pr`）、`qcom-subsys-start.service/.timer`（拉 mpss/adsp/cdsp/slpi） | 固件 `qcom/sm8150/xiaomi/crux/{modem,adsp,cdsp,slpi}.mbn`；分区 `modemst1/2`、`fsc`、`fsg`（EFS） | ⚠️ 子系统能起、ModemManager 常驻；注册/数据未验证 |
+| **USB（ECM/ACM）** | `usbutils`、`libusb` | `usb-gadget-acm.service`、`usb-align.service`（ARP/路由对齐） | 供电 `qcom_usb_vbus-regulator.ko`（在 `modules/`）、`modules-load.d/crux-usb.conf` | ✅ 可用 |
+| **电源 / 充电 / 关机链** | `systemd` | `crux-charger-init.service`、`crux-markshutdown.service`、`crux-crashsave.service`、`dmesg-snap.service`、`power-snap.service`、`crux-kmsg-tap.service`、`99-printk-quiet.conf` | `pm8150b` charger/fuel-gauge 驱动 | ✅ 可用 |
+| **交换空间** | — | `crux-swap.service`（zram 4G 默认开；`/mnt/lroot` 上的 8G swapfile 由 `/etc/crux-swap.conf` 的 `LROOT_SWAP` 控制，**默认关**） | — | ✅ zram 可用 |
+| **外挂 X50 / SIM** | — | `x50-*` 单元与程序**按原路径就位但默认不 enable**（见 §5.7），开关 `crux-sim-x50` | 固件 `qcom/sdx50m/*` | ⛔ 未跑通，默认不启用 |
+| **相机** | — | — | — | ⛔ **未适配，本包不涉及** |
+
+---
+
+## 5. 适配层清单
+
+### 5.1 服务（systemd 单元）
 
 | 单元 | 作用 | 开机启用 |
 |---|---|---|
-| `rmtfs.service` | Qualcomm remotefs（EFS 读写，模组固件/NV） | ✅ |
-| `tqftpserv.service` | QRTR TFTP 服务（给 DSP/模组发固件） | ✅ |
-| `pd-mapper.service` | Qualcomm PD Mapper（保护域映射） | ✅ |
-| `hexagonrpcd-sdsp.service` | 传感器 DSP 的 FastRPC 文件服务（SLPI/SDSP） | ✅ |
-| `crux-ssc-registry.service` | 生成 SSC 传感器 registry 文件树（hexagonrpcd 用） | ✅ |
-| `iris-vpu.service` | 加载 `videocc-sm8150`/`system_heap`/`cma_heap`/`qcom_iris`（VPU 解码） | ✅ |
-| `npu-svc.service` | NPU 常驻服务（unix socket `/run/npu.sock`；TCP 5300 需 `NPU_SVC_TCP=1`） | ✅ |
-| `npu-boot.service` | NPU PAS 开机序列（insmod `npu_boot24.ko`） | ⛔ 默认不启用 |
+| `rmtfs.service` | Qualcomm remotefs（EFS 读写） | ✅ |
+| `tqftpserv.service` | QRTR TFTP（给 DSP/模组发固件） | ✅ |
+| `pd-mapper.service` | 保护域映射 | ✅ |
+| `hexagonrpcd-sdsp.service` | 传感器 DSP 的 FastRPC 文件服务 | ✅ |
+| `crux-ssc-registry.service` | 生成 SSC 传感器 registry 文件树 | ✅ |
+| `iris-vpu.service` | 加载 `videocc-sm8150`/`system_heap`/`cma_heap`/`qcom_iris` | ✅ |
+| `npu-svc.service` | NPU 常驻服务（`/run/npu.sock`） | ✅ |
+| `npu-boot.service` | NPU PAS 开机序列（`insmod npu_boot24.ko`） | ⛔ 默认不启用 |
 | `crux-fastrpc-guard.service` | FastRPC 守护 | ✅ |
-| `crux-touch-watchdog.service` | 触摸 IC 周期健康检查 + 自恢复 | ✅ |
-| `crux-gpu-iface.service` | 暴露 GPU 统计为标准 DRM 接口 | — |
-| `crux-sensor-adapt.service` | 把 hwmon 适配成 `cpu-thermal` 等标准名 | — |
-| `usb-gadget-acm.service` / `usb-align.service` | USB ECM 网卡 gadget + ARP 对齐 | ✅ |
-| `qsee-supplicant.service` / `qsee-app-loader@.service` | Qualcomm TEE 常驻服务 / 应用加载器 | ✅ |
-| `crux-audio-route.service` | 开机把播放路由固定到扬声器通路（`QUAT_MI2S_RX Audio Mixer MultiMedia1=on`）；ASoC FE 没有 BE 时 open 会直接 EINVAL | ✅ |
-| `crux-time-sync.service` + `crux-time-sync.timer` | 开机校时 + 每 6 小时兜底（本机 **RTC 无驱动**，时间会错到 30 天前，apt 立刻报 Release not valid yet） | ✅ |
-| `crux-swap.service` | zram 4G（zstd，优先级 100）**默认启用**；`/mnt/lroot/swapfile` 8G 由 `/etc/crux-swap.conf` 的 `LROOT_SWAP` 控制，**默认关闭** | ✅ |
-| `crux-ufs-stable.service` | 标准 sysfs 加固：`auto_hibern8=0`、`clkgate_delay_ms=1000`、各 LUN `power/control=on`（防链路 -110、关机跳过 SYNCHRONIZE CACHE） | ✅ |
-| `ufs-nopm.service` | QCOM 私有低功耗开关：`rpm_lvl=0`、`clkgate_enable=0`、`clkscale_enable=0`（与上一条**互补不重复**） | ✅ |
+| `crux-touch-watchdog.service` | 触摸 IC 体检 + 自恢复 | ✅ |
+| `crux-gpu-iface.service` | GPU 统计暴露为标准 DRM 接口 | — |
+| `crux-sensor-adapt.service` | hwmon → `cpu-thermal` 等标准名 | — |
+| `usb-gadget-acm.service` / `usb-align.service` | USB ECM gadget / ARP 对齐 | ✅ |
+| `qsee-supplicant.service` / `qsee-app-loader@.service` | Qualcomm TEE 服务 / 应用加载器 | ✅ |
+| `crux-audio-route.service` | 开机把播放路由固定到扬声器通路（`QUAT_MI2S_RX Audio Mixer MultiMedia1=on`）；FE 没有 BE 时 open 会 EINVAL | ✅ |
+| `crux-time-sync.service` + `.timer` | 开机校时 + 每 6 小时兜底（本机 **RTC 无驱动**，时间会错到 30 天前，apt 立刻报 `Release not valid yet`） | ✅ |
+| `crux-swap.service` | zram 4G（zstd，prio 100）**默认启用**；`/mnt/lroot/swapfile` 8G 由 `/etc/crux-swap.conf` 控制，**默认关闭** | ✅ |
+| `crux-ufs-stable.service` / `ufs-nopm.service` | UFS 两种加固（标准 sysfs / QCOM 私有 sysfs），**互补不重复** | ✅ |
 | `crux-charger-init.service` | 开机设置 SMB5 充电电流 ICHG | ✅ |
-| `crux-crashsave.service` | 把上一轮 dmesg 尾部写到 ESP（`EFI/crux/LASTBOOT.TXT`、非正常关机时额外 `CRASH.TXT`） | ✅ |
+| `crux-crashsave.service` | 上一轮 dmesg 尾部写到 ESP（`LASTBOOT.TXT` / `CRASH.TXT`） | ✅ |
 | `crux-markshutdown.service` | 打“干净关机”标记（`WantedBy=shutdown.target`） | ✅ |
-| `qcom-subsys-start.service` + `.timer` | 拉 **mpss / cdsp / slpi** 三个远端子系统 + adsp（内置，不自动 boot）；timer 在开机 20s 兜底 | ✅ |
-| `modem-mnt.service` | 把 modem(NON-HLOS) 分区只读挂到 `/mnt/mdmpart`，并把 `image/modem_pr` 链到固件目录（tqftpserv 用） | ✅ |
-| `crux-kmsg-tap.service` / `dmesg-snap.service` / `power-snap.service` | 内核日志落盘 / dmesg 尾部快照 / 电源状态快照（全是排障用，常驻） | ✅ |
-| `/etc/crux-swap.conf` | 交换空间开关（不是 unit）：`LROOT_SWAP=0` 默认只 zram；`=1` 才在 `/mnt/lroot` 上建 8G swapfile | — |
-| `/usr/local/sbin/crux-sim-x50` + `/etc/crux-sim.conf` | SIM/X50 开关（不是 unit）：整套外挂 X50 的东西放在 `/opt/crux/sim-x50/`，**默认不安装**；`enable` 才铺回系统路径 | — |
+| `qcom-subsys-start.service` + `.timer` | 拉 `mpss`/`adsp`/`cdsp`/`slpi`（modem 是 `auto_boot=false`），timer 20s 兜底 | ✅ |
+| `modem-mnt.service` | 挂 modem(NON-HLOS) 分区到 `/mnt/mdmpart`，链 `image/modem_pr` | ✅ |
+| `crux-kmsg-tap.service` / `dmesg-snap.service` / `power-snap.service` | 内核日志落盘 / dmesg 快照 / 电源状态快照 | ✅ |
 
-### 2.2 用户态程序（`overlay/usr/local/`）
+> 注：`x50-*` 系列 15 个单元、`modem-mgr`、`tqftpserv-v3`、`crux-x50-poweroff` 也在仓库里（原路径），但**默认一个都不 enable**，见 §5.7。
 
-- `bin/`：`npu`、`npuctl`、`npu-svc`（NPU 工具链与常驻服务）、`hexagonrpcd`、`ssccli`、`sscregistrygen`（传感器 DSP）、`rmtfs`、`tqftpserv`、`pd-mapper`（模组/DSP 基础服务）、`crux-*` 一组适配脚本（触摸看护、GPU 接口、传感器适配、USB gadget/对齐）
-- `sbin/`：`crux-ssc-registry-gen.sh`、`wait-dsp-ready.sh`
-- `lib/`：`libhexagonrpc.so.0.5`、`libqrtr.so.1.2`（FastRPC / QRTR 用户态库）
+### 5.2 用户态程序（`overlay/usr/local/`）
+
+- `bin/`：`npu`、`npuctl`、`npu-svc`、`hexagonrpcd`、`ssccli`、`sscregistrygen`、`rmtfs`、`tqftpserv`、`pd-mapper`、`crux-*.sh`（音频路由/触摸看护/GPU 接口/传感器适配/USB gadget）/ `uim` 等
+- `sbin/`：`crux-ssc-registry-gen.sh`、`wait-dsp-ready.sh`、`crux-*`（时间/swap/UFS/充电/关机/子系统拉起）、`crux-sim-x50`（SIM 开关）
+- `lib/`：`libhexagonrpc.so.0.5`、`libqrtr.so.1.2`
 - `libexec/`：`hexagonrpc/chrecd`、`resources/resources-{adjust,kill,processes}`
 - `share/`：`resources/resources.gresource`
 
-### 2.3 内核模块（`modules/`）
+### 5.3 内核模块（`modules/`）
 
 | 模块 | 用途 |
 |---|---|
 | `msm_qmp.ko` | SM8150 QMP/QRTR 传输配套 |
-| `npu_boot24.ko` | NPU 上电与启动序列（Android-golden PAS 流程） |
+| `npu_boot24.ko` | NPU 上电与启动序列 |
+| `qcom_usb_vbus-regulator.ko` | typec 的 `vdd-vbus-supply`（原 rootfs 里就缺这个，缺了 USB 起不来） |
 
-### 2.4 模块/内核相关配置
+### 5.4 模块/内核相关配置
 
-- `etc/modules-load.d/crux-wifi.conf` → 开机加载 `ath10k_snoc`（WCN3990）
-- `etc/modules-load.d/msm_qmp.conf` → `msm_qmp`
-- `etc/modprobe.d/99-qcom-iris.conf`、`etc/modprobe.d/blacklist-crux-video.conf`
-- `etc/udev/rules.d/99-qcom-iris-dmaheap.rules` → `dma_heap/system` 权限 0666（Chrome 的 VA-API 解码需要，否则回退软解）
-- `etc/sysctl.d/90-ufs-writeback.conf`、`etc/sysctl.d/99-printk-quiet.conf`（dirty 写回参数 / 控制台只留 warning 以上）
+- `etc/modules-load.d/crux-wifi.conf`（`ath10k_snoc`）、`msm_qmp.conf`、`crux-usb.conf`
+- `etc/modprobe.d/99-qcom-iris.conf`（`cached_capture=1`）、`blacklist-crux-video.conf`
+- `etc/udev/rules.d/99-qcom-iris-dmaheap.rules`（`dma_heap/system` 0666）
+- `etc/sysctl.d/90-ufs-writeback.conf`、`99-printk-quiet.conf`
 
-### 2.5 音频（2026-10-20 打通，双设备）
+### 5.5 音频（2026-10-20 打通，双设备）
 
 | 文件 | 作用 |
 |---|---|
-| `usr/share/alsa/ucm2/conf.d/sm8150/sm8150.conf` | UCM 入口，**Syntax 3**，`SectionUseCase."HiFi"` |
-| `usr/share/alsa/ucm2/conf.d/sm8150/HiFi.conf` | `SectionVerb` 里写播放路由；`Speaker`（优先级 200，QUAT_MI2S→CS35L41）、`Earpiece`（优先级 100，SLIMBUS_0_RX→RX INT0→EAR） |
+| `usr/share/alsa/ucm2/conf.d/sm8150/sm8150.conf` | UCM 入口（**Syntax 3**，`SectionUseCase."HiFi"`） |
+| `usr/share/alsa/ucm2/conf.d/sm8150/HiFi.conf` | `SectionVerb` 里写播放路由；`Speaker`（200，QUAT_MI2S→CS35L41）、`Earpiece`（100，SLIMBUS_0_RX→RX INT0→EAR） |
 | `etc/wireplumber/wireplumber.conf.d/51-crux-fmt.conf` | `node.name = ~alsa_output.*` → 强制 **S16LE / 48k / 2ch** |
 | `etc/wireplumber/wireplumber.conf.d/52-crux-noproaudio.conf` | 关掉 `pro-audio` profile（否则 ACP 默认选它，8ch 无声） |
-| `usr/local/bin/crux-audio-route.sh` + `crux-audio-route.service` | 开机把 BE mixer 打开做保险 |
+| `usr/local/bin/crux-audio-route.sh` + `crux-audio-route.service` | 开机打开 BE mixer 做保险 |
 
 **出声要同时满足三条，缺一条都是静默失败**（FE 显示 RUNNING、dmesg 无报错、就是没声音）：
 
-1. **ALSA 卡 id 必须等于 UCM 目录名 `sm8150`。** 卡 id 由 dts `&sound { model = "…" }` 的**最后一个词**决定（`sound/core/init.c: retrieve_id_from_card_name()`）；而 `ucm.conf` 里 `Define.V2Name ""` 关闭了按卡名查找，只按驱动名查 `conf.d/`。
-2. **UCM 必须是 Syntax 3、路由写在 `SectionVerb` 的 `EnableSequence`。** 写成 Syntax 4 + `SectionPCM` 会让 ACP 的逐 PCM 探测失败（`_ucmXXXX.hw:0` 打不开）。
+1. **ALSA 卡 id 必须等于 UCM 目录名 `sm8150`。** 卡 id 由 dts `&sound { model = "…" }` 的**最后一个词**决定（`sound/core/init.c: retrieve_id_from_card_name()`）；`ucm.conf` 里 `Define.V2Name ""` 关闭按卡名查找，只按驱动名查 `conf.d/`。
+2. **UCM 必须 Syntax 3、路由写在 `SectionVerb` 的 `EnableSequence`。** 写成 Syntax 4 + `SectionPCM` 会让 ACP 的逐 PCM 探测失败（`_ucmXXXX.hw:0` 打不开）。
 3. **PipeWire 侧必须 S16_LE / 2ch / 48k。** 默认会以 `S24_LE / 8ch` 打开 —— 全程无声且不报错。
 
-排查口诀：先看 `dmesg | grep "no backend DAIs enabled"`（说明 BE mixer 没开），再看 `hw_params` 是不是 `S24_LE / 8ch`。
+排查口诀：先看 `dmesg | grep "no backend DAIs enabled"`（BE 没开），再看 `hw_params` 是不是 `S24_LE / 8ch`。
 
-### 2.6 drop-in 修正（`*.service.d/*.conf`）
+### 5.6 drop-in 修正（`*.service.d/*.conf`）
 
 | 目标单元 | drop-in | 内容 |
 |---|---|---|
@@ -104,126 +214,45 @@
 
 少了这些，关机时会白等满 90 秒。
 
-### 2.7 SIM / 外挂 X50（sdx50m）—— 原样就位，默认不启动
+### 5.7 外挂 X50 / SIM —— 原样就位，默认不启动
 
-这套东西是**本机专用**的（不是通用镜像），所以文件就按原样待在系统路径里，不做镜像目录、不做安装/卸载动作。
-开关只决定一件事：**这些单元要不要开机起来**。
+这套是**本机专用**的，不是通用镜像，所以文件就按原样待在系统路径里（`etc/systemd/system/x50-*`、`usr/local/{bin,sbin}/x50-*`、`etc/udev/rules.d/{77-mm-x50-*,99-x50-nopm}`、`etc/modprobe.d/{x50-mhi,ipa_mhi_proxy}.conf`）。开关只决定**要不要开机起来**：
 
 | 项 | 说明 |
 |---|---|
-| 文件位置 | 就按原路径：`etc/systemd/system/x50-*`、`etc/systemd/system/{modem-mgr,tqftpserv-v3,crux-x50-poweroff}`、`usr/local/{bin,sbin}/x50-*` 等、`etc/udev/rules.d/{77-mm-x50-*,99-x50-nopm}`、`etc/modprobe.d/{x50-mhi,ipa_mhi_proxy}.conf` |
-| 内容（70 个文件） | 15 个单元 + 13 个 drop-in + 约 30 个程序（`x50-modem-loader`、`x50-qmi-*`、`x50-pdc-*`、`mdm_helper_native`、`mhi_efs_sync`、`pm_service_native`、`qmisd`、`q2*/q5*/qmi/qraw` 等）+ 3 条 udev + 2 个 modprobe 参数 |
-| **默认状态** | 文件在，但**没有任何 `*.wants` 链接、`build.sh` 的 UNITS 里也不列** → 开机不启动，SIM 侧不参与 |
-| 开关文件 | `/etc/crux-sim.conf` 的 `SIM_X50_ENABLE`（**默认 0**） |
-| 打开 | `crux-sim-x50 enable` → 把 15 个单元全部 `systemctl enable`；要立刻生效再 `systemctl start x50-modem-boot` |
-| 关闭 | `crux-sim-x50 disable` → `systemctl disable --now` 这 15 个单元（**文件不动**，随时可再 enable） |
-| 查看 | `crux-sim-x50 status` |
+| 默认状态 | 文件在，但**没有任何 `*.wants` 链接、`build.sh` 的 UNITS 里也不列** → 开机不启动 |
+| 开关 | `/etc/crux-sim.conf` 的 `SIM_X50_ENABLE`，**默认 0** |
+| 打开 / 关闭 / 查看 | `crux-sim-x50 enable` / `disable` / `status`（只做 `systemctl enable` / `disable --now`，不搬文件） |
 
-**为什么默认不启动**：X50 那条链（MHI → IPA → QMI → UIM provisioning session `0x38`）还没跑通，
-曾出现过“做 QMI 操作把整机拖死”的情况。默认状态下参与基带的只有**内置四个子系统**
-（`mpss` / `adsp` / `cdsp` / `slpi`，由 `qcom-subsys-start` 拉起），SIM 侧完全不介入——
-`qcom-subsys-start.service` 里也已去掉 `x50-rfs-persist` 那个依赖。
+**为什么默认不启动**：X50 那条链（MHI → IPA → QMI → UIM provisioning session `0x38`）还没跑通，曾出现过“做 QMI 操作把整机拖死”。默认参与基带的只有**内置四个子系统**；`qcom-subsys-start.service` 里也已去掉 `x50-rfs-persist` 依赖。
 
-> 注意：`x50-mhi.conf` / `ipa_mhi_proxy.conf` 放在 `etc/modprobe.d/` 只是“参数就位”，
-> 默认没有任何路径去 `modprobe ipa_mhi_proxy`（那条 `insmod` 在 `x50-modem-boot.sh` 里），
-> 所以不 enable 时它们不产生效果。
+> `x50-mhi.conf` / `ipa_mhi_proxy.conf` 在 `modprobe.d` 只是“参数就位”，默认没有任何路径去 `modprobe ipa_mhi_proxy`（那条 `insmod` 在 `x50-modem-boot.sh` 里），不 enable 时无效果。
 
----|---|
-| 存放位置 | `overlay/opt/crux/sim-x50/` —— 按**系统绝对路径镜像**存放（`etc/systemd/system/…`、`usr/local/bin/…`），套用 overlay 后落在 `/opt/crux/sim-x50/`，**不生效** |
-| 内容（70 个文件） | 15 个单元（`x50-modem-boot` / `x50-online` / `x50-qmi-l4` / `x50-qmi-l5` / `x50-card-monitor` / `x50-liveness` / `x50-efs-sync` / `x50-gen3` / `x50-pdc` / `x50-rfs-persist` / `x50-uim-prepare` / `x50-uim-activate` / `modem-mgr` / `tqftpserv-v3` / `crux-x50-poweroff`）+ 13 个 drop-in + 30 个程序（`x50-modem-loader`、`x50-qmi-*`、`x50-pdc-*`、`mdm_helper_native`、`mhi_efs_sync`、`pm_service_native`、`qmisd`、`q2*/q5*/qmi/qraw` 等调试脚本）+ 3 条 udev 规则（`77-mm-x50-efs` / `77-mm-x50-fusion` / `99-x50-nopm`）+ 2 个 modprobe 参数（`x50-mhi.conf` / `ipa_mhi_proxy.conf`） |
-| 开关 | `/etc/crux-sim.conf` 的 `SIM_X50_ENABLE`（**默认 0**） |
-| 打开 | `crux-sim-x50 enable` → 铺回系统路径 + `udevadm control --reload-rules` + `daemon-reload` + enable 全部单元；之后 `systemctl start x50-modem-boot` 或直接重启 |
-| 关闭 | `crux-sim-x50 disable` → 停掉并 disable 全部单元 + 从系统路径移除文件（`/opt` 下副本保留） |
-| 查看 | `crux-sim-x50 status` |
-
-**默认不安装的原因**：X50 那条链（MHI → IPA → QMI → UIM provisioning session `0x38`）目前还没跑通，
-曾出现过“做 QMI 操作把整机拖死”的情况。默认状态下参与基带的只有**内置四个子系统**
-（`mpss` / `adsp` / `cdsp` / `slpi`，由 `qcom-subsys-start` 拉起），SIM 侧完全不介入——
-`qcom-subsys-start.service` 里也已去掉 `x50-rfs-persist` 那个依赖。
-
----
-
-## 3. 怎么用
-
-### A. 套到已有的 Ubuntu 系统上（最快）
-
-```bash
-sudo tar xzf crux-overlay.tar.gz -C /
-# 内核模块（按实际内核版本）
-sudo mkdir -p /usr/lib/modules/$(uname -r)/extra
-sudo cp modules/*.ko /usr/lib/modules/$(uname -r)/extra/
-# 启用服务
-for u in rmtfs tqftpserv pd-mapper hexagonrpcd-sdsp crux-ssc-registry iris-vpu \
-         npu-svc crux-fastrpc-guard crux-touch-watchdog usb-gadget-acm usb-align qsee-supplicant \
-         modem-mnt qcom-subsys-start crux-audio-route crux-time-sync crux-swap crux-ufs-stable \
-         ufs-nopm crux-charger-init crux-crashsave crux-markshutdown crux-kmsg-tap dmesg-snap power-snap; do
-  sudo systemctl enable --now $u.service
-done
-for t in crux-time-sync.timer qcom-subsys-start.timer; do
-  sudo systemctl enable --now $t
-done
-```
-
-### B. 从零构建最小 rootfs
-
-```bash
-sudo ./build.sh /mnt/target          # 默认 SUITE=resolute（Ubuntu 26.04）、ARCH=arm64
-```
-
-再把**内核模块装进目标 rootfs**（在设备内核源码树里执行）：
-
-```bash
-make O=build73 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules_install INSTALL_MOD_PATH=/mnt/target
-```
-
-### C. 装到设备
-
-1. 把 rootfs 写到设备的分区（`linux-root*`，实测在 `/dev/sda36`/`sda37`），`/etc/fstab` 写 `root=UUID=<该分区UUID>`
-2. GRUB 条目（ESP `EFI/crux/grub.cfg`）里给出对应的 `root=UUID=…`，并在菜单项里指定内核 `Image73`、initramfs 与 dtb
-3. 设备访问一律用 **`crux.local`（mDNS）**，不要写死 IP
-
----
-
-## 3.x 默认凭据（root 通用密码）
-
-| 项 | 值 |
-|---|---|
-| 用户 | `root` |
-| **通用密码** | **`root`** |
-| SSH | 允许 root 用密码或 key 登录（`PermitRootLogin yes` / `PasswordAuthentication yes`） |
-
-构建时可覆盖：`sudo ROOT_PASS=你的密码 ./build.sh /mnt/target`
-
-> ⚠️ 出厂通用密码只为第一次进系统方便；**登录后第一件事就改掉**：`passwd root`
-
-## 4. 已验证状态（2026-10-20 09:30 设备实测）
-
-显示（DSI ea8076，`card0-DSI-1=connected`）、GPU、触摸（`fts`）、按键、UFS、`/vendor`+`/mnt/sys` 只读读取、
-WiFi（`ath10k_snoc`，`wlan0` 静态 `192.168.1.240`）、四颗 remoteproc（slpi/modem/cdsp/adsp）全 running、
-rmtfs/tqftpserv/ModemManager/modem-mnt 常驻、**NPU（`/dev/msm_npu` + `npu-svc` 运行中，InceptionV3 109 层 / 10.31 ms / 92.5%）**、
-视频编解码（`/dev/video0/1`）、26 个 thermal zone、
-**音频（Speaker + Earpiece 双设备可切、已实听出声，`hw_params = S16_LE/2ch/48000`）**均已就位。
-
-> 基带部分本仓库只保证**内置四个子系统（mpss/adsp/cdsp/slpi）能起来**这条基础链，
-> **不含外挂 X50（sdx50m）那一套**（`x50-*` 单元、`x50-mhi.conf`、`ipa_mhi_proxy.conf` 均未收录）。
-
----
-
-## 5. 注意
-
-- `npu-boot.service` 在设备原版里指向 `/root/npu_test/npu_boot24.ko`；**本仓库版已改为 `/usr/lib/modules/$(uname -r)/extra/npu_boot24.ko`**，不再依赖 `/root`
-- `npu-svc` 默认只开 unix socket；需要局域网调用时设 `NPU_SVC_TCP=1`（TCP 5300）
-- 服务之间有顺序依赖：`qrtr-ns` → `pd-mapper`/`tqftpserv` → `rmtfs`/`hexagonrpcd`
-### 交换空间：哪部分是默认开的，哪部分要手动开
+### 5.8 交换空间
 
 | 组成 | 落点 | 默认 | 打开方式 |
 |---|---|---|---|
-| zram 4 GiB（zstd，优先级 100） | 内存压缩，**不依赖任何分区** | ✅ 开 | 无需操作 |
-| 8 GiB swapfile（优先级 10） | `/mnt/lroot`（`PARTLABEL=linux-root`，实测 `sda36` 64G） | ⛔ **关** | `/etc/crux-swap.conf` 里 `LROOT_SWAP=1`，同时 fstab 去掉 `/mnt/lroot` 那行的注释，然后 `systemctl restart crux-swap` |
+| zram 4 GiB（zstd，prio 100） | 内存压缩，不依赖分区 | ✅ 开 | 无需操作 |
+| 8 GiB swapfile（prio 10） | `/mnt/lroot`（`PARTLABEL=linux-root`，实测 `sda36` 64G） | ⛔ 关 | `/etc/crux-swap.conf` 改 `LROOT_SWAP=1`，fstab 加 `/mnt/lroot` 条目，`systemctl restart crux-swap` |
 
-**为什么默认关**：`sda36` 是可选的第二块盘，可能被删除并入根分区（根分区 24G 那个是 `sda37`）。
-如果开机默认就去挂它，等于把启动路径绑在一块随时可能不存在的盘上。所以脚本和 unit 都改成
-“只有 `LROOT_SWAP=1` 才碰 `/mnt/lroot`”，unit 里也不再有 `Wants=mnt-lroot.mount` 与挂载用的
-`ExecStartPre`。默认路径下 `crux-swap` 只建 zram，`/mnt/lroot` 不存在也完全不影响开机。
-- 基带只保底“四个子系统能起来”：`qcom-subsys-start` 的依赖里已去掉 X50 的 `x50-rfs-persist.service`
-- 本包只是**适配层 + 基础系统**；桌面（KDE）、Docker 等按需自行安装
+---
+
+## 6. 已验证状态（2026-10-20 09:30 设备实测）
+
+显示（`card0-DSI-1=connected`）、GPU、触摸（`fts`）、按键、UFS、`/vendor`+`/mnt/sys` 只读读取、
+WiFi（`ath10k_snoc`，`wlan0` 静态 `192.168.1.240`）、四颗 remoteproc（slpi/modem/cdsp/adsp）全 `running`、
+rmtfs/tqftpserv/ModemManager/modem-mnt 常驻、**NPU（`/dev/msm_npu` + `npu-svc`，InceptionV3 109 层 / 10.31 ms / 92.5%）**、
+视频编解码（`/dev/video0/1`）、26 个 thermal zone、
+**音频（Speaker + Earpiece 双设备可切、已实听出声，`hw_params = S16_LE/2ch/48000`）**均已就位。
+
+---
+
+## 7. 注意
+
+- `npu-boot.service` 指向 `/usr/lib/modules/$(uname -r)/extra/npu_boot24.ko`（不再依赖 `/root`）
+- `npu-svc` 默认只开 unix socket；需要局域网调用设 `NPU_SVC_TCP=1`（TCP 5300）
+- 服务顺序：`qrtr-ns` → `pd-mapper`/`tqftpserv` → `rmtfs`/`hexagonrpcd`
+- `crux-swap` 的 8G swapfile 依赖 `/mnt/lroot`；**若删掉那块分区**只留 zram 即可（默认就是关的）
+- SIM/X50 默认不 enable；要试就 `crux-sim-x50 enable`，出问题 `crux-sim-x50 disable`
+- **相机未适配**，本包不含任何相机相关配置
+- 本包只是**适配层 + 子系统用户态**；桌面（KDE/GNOME）、Docker 等按需自行安装
