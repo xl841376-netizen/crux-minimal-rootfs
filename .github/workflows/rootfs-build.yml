@@ -79,7 +79,10 @@ jobs:
           for f in ./etc/fstab ./etc/crux-swap.conf ./usr/local/bin/crux-audio-route.sh \
                    ./usr/lib/systemd/system/crux-audio-route.service \
                    ./usr/share/alsa/ucm2/conf.d/sm8150/sm8150.conf \
-                   ./usr/lib/modules/${{ inputs.kver }}/extra \
+                   ./usr/lib/modules/${{ inputs.kver }}/kernel/drivers/crux/crux_esoc.ko \
+                   ./usr/lib/modules/${{ inputs.kver }}/kernel/drivers/crux/npucc-sm8150.ko \
+                   ./usr/lib/modules/${{ inputs.kver }}/kernel/drivers/crux/npu/msm_npu.ko \
+                   ./usr/lib/modules/${{ inputs.kver }}/kernel/drivers/net/ipa/ipa_mhi_proxy.ko \
                    ./lib/firmware/ath10k/WCN3990/hw1.0/firmware-5.bin \
                    ./usr/sbin/NetworkManager ./usr/bin/pipewire \
                    ./usr/sbin/qsee-supplicant ./usr/sbin/qsee-app-loader \

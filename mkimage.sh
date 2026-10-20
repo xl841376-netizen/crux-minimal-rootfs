@@ -87,6 +87,45 @@ if [ "$WITH_FW" = 1 ] && [ -n "$FW_DIR" ]; then
   cp -a "$FW_DIR/firmware/." "$RFS/lib/firmware/"
   cp -a "$FW_DIR/modules/." "$RFS/lib/modules/"
   find "$RFS/lib/modules" "$RFS/lib/firmware" \( -name '*.bak*' -o -name '*.orig' \) -delete
+
+  # ---------- 模块路径归一：extra/ -> kernel/（与内核树内一致）----------
+  # 目的：固件资产（fw-* Release）里的模块可能还是树外编的布局，放在
+  #       /lib/modules/$KVER/extra/ 下；而内核树内编出来的对应模块在
+  #       kernel/drivers/crux/ 与 kernel/drivers/net/ipa/ 下。
+  #       同名两份会让 depmod 告警并按 modules.dep 二选一，结果不确定。
+  #       这里统一搬到内核树内路径：kernel/ 已有同名 -> 删 extra 副本；
+  #       否则搬过去（兼容旧资产，保证云端产物与设备一致）。
+  MOD="$RFS/lib/modules/$KVER"
+  if [ -d "$MOD/extra" ]; then
+    moved=0; dropped=0
+    for ko in "$MOD/extra"/*.ko; do
+      [ -e "$ko" ] || continue
+      b=$(basename "$ko")
+      case "$b" in
+        crux_esoc.ko|npucc-sm8150.ko) dst="$MOD/kernel/drivers/crux" ;;
+        msm_npu.ko)                   dst="$MOD/kernel/drivers/crux/npu" ;;
+        ipa_mhi_proxy.ko)             dst="$MOD/kernel/drivers/net/ipa" ;;
+        *) continue ;;
+      esac
+      if [ -e "$dst/$b" ]; then
+        rm -f "$ko"; dropped=$((dropped + 1))
+      else
+        mkdir -p "$dst"; mv -f "$ko" "$dst/"; moved=$((moved + 1))
+      fi
+    done
+    find "$MOD/extra" -name '*.bak*' -delete 2>/dev/null || true
+    rmdir "$MOD/extra" 2>/dev/null || true
+    echo "   模块归一: 移动 $moved 个 / 去重 $dropped 个（extra/ 已清空）"
+  fi
+
+  # 重算模块依赖（必须：否则 modules.dep 仍指向 extra/ 下的旧路径）
+  if [ -x "$RFS/usr/sbin/depmod" ]; then
+    if chroot "$RFS" /usr/sbin/depmod -a "$KVER" 2>/dev/null; then
+      echo "   depmod: ok（modules.dep $(wc -l < "$MOD/modules.dep" 2>/dev/null || echo '?') 条）"
+    else
+      echo "   depmod: !! 失败（模块依赖可能不准）"
+    fi
+  fi
 fi
 
 echo "== [5/6] 系统配置"
@@ -118,7 +157,7 @@ mkdir -p "$RFS/var/log"
 
 echo "== [6/6] 打包"
 NAME="crux-rootfs-${SUITE}-arm64-$(date +%Y%m%d)"
-( cd "$RFS" && tar --zstd -cf "$OUT/$NAME.tar.zst" . )
+( cd "$RFS" && tar -I "zstd -19 -T0" -cf "$OUT/$NAME.tar.zst" . )
 ( cd "$OUT" && sha256sum "$NAME.tar.zst" > SHA256SUMS )
 echo "== 完成: $OUT/$NAME.tar.zst  $(du -h "$OUT/$NAME.tar.zst" | cut -f1)"
 echo "   大小明细: 系统+包 $(du -sh --exclude=lib/firmware --exclude=lib/modules "$RFS" | cut -f1) / 固件 $(du -sh "$RFS/lib/firmware" 2>/dev/null | cut -f1) / 模块 $(du -sh "$RFS/lib/modules" 2>/dev/null | cut -f1)"
