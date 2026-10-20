@@ -49,10 +49,12 @@ crux 最小 rootfs 第三方组件版权与许可声明
 五、libssc 与 ssccli（GPLv3）
 --------------------------------------------------------------------
 组件：libssc、ssccli
+版本：libssc 0.4.4（未修改，直接由上游源码编译）
 上游：https://github.com/linux-msm/libssc
 许可：GNU General Public License v3（见该仓库 LICENSE）
 版权：各上游项目作者
-说明：ssccli 为该库附带的命令行工具；分发包含该工具时，应同时提供 libssc 与 ssccli 的对应源码。
+说明：ssccli 为该库附带的命令行工具。本系统内 libssc 与 ssccli 均为上游 0.4.4 原样编译，
+      未做修改，对应源码即上游 tag v0.4.4。
 
 --------------------------------------------------------------------
 六、Ubuntu 基础系统与软件包

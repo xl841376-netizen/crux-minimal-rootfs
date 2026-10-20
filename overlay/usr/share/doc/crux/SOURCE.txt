@@ -20,8 +20,8 @@ GPLv2（含内核、内核模块、VA-API 驱动）：
 GPLv3：
   hexagonrpcd、libhexagonrpc、chrecd、sscregistrygen
   上游：https://github.com/linux-msm/hexagonrpc
-  libssc（含 ssccli）
-  上游：https://github.com/linux-msm/libssc
+  libssc 0.4.4（含 ssccli，未修改）
+  上游：https://github.com/linux-msm/libssc（tag v0.4.4）
   本项目对 hexagonrpcd 的修改（相对上游 598b591 约 600 行改动）：
       见本仓库 src/hexagonrpc-patches/crux-hexagonrpcd-20261020.patch
       构建说明见同目录 README.md（aarch64 已实测可编译）
