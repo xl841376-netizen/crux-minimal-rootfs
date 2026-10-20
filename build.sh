@@ -87,8 +87,10 @@ cat > "$DEST/etc/fstab" <<'EOF'
 # UUID=<在此填写> / ext4 defaults,noatime 0 1
 #
 # [可选] 第二块盘（sda36, PARTLABEL=linux-root 64G）用作 8G swapfile 的落点。
-#        crux-swap.service / crux-swap-setup.sh 依赖这个挂载点；
-#        不写这一行也能开机，但只会剩下 zram 4G 的交换空间。
+#        默认【不需要】：/etc/crux-swap.conf 里 LROOT_SWAP=0（默认），
+#        crux-swap 只建 zram 4G，不依赖任何分区。
+#        想在它上面加 8G swapfile 时：① 去掉下面这行注释；② 把
+#        /etc/crux-swap.conf 改成 LROOT_SWAP=1；③ systemctl restart crux-swap
 # PARTLABEL=linux-root /mnt/lroot ext4 defaults,noatime,nofail 0 2
 EOF
 [ -d "$DEST/root" ] || mkdir -p "$DEST/root"

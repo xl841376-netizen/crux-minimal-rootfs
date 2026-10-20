@@ -42,7 +42,7 @@
 | `qsee-supplicant.service` / `qsee-app-loader@.service` | Qualcomm TEE 常驻服务 / 应用加载器 | ✅ |
 | `crux-audio-route.service` | 开机把播放路由固定到扬声器通路（`QUAT_MI2S_RX Audio Mixer MultiMedia1=on`）；ASoC FE 没有 BE 时 open 会直接 EINVAL | ✅ |
 | `crux-time-sync.service` + `crux-time-sync.timer` | 开机校时 + 每 6 小时兜底（本机 **RTC 无驱动**，时间会错到 30 天前，apt 立刻报 Release not valid yet） | ✅ |
-| `crux-swap.service` | zram 4G（zstd，优先级 100）+ `/mnt/lroot/swapfile` 8G（优先级 10） | ✅ |
+| `crux-swap.service` | zram 4G（zstd，优先级 100）**默认启用**；`/mnt/lroot/swapfile` 8G 由 `/etc/crux-swap.conf` 的 `LROOT_SWAP` 控制，**默认关闭** | ✅ |
 | `crux-ufs-stable.service` | 标准 sysfs 加固：`auto_hibern8=0`、`clkgate_delay_ms=1000`、各 LUN `power/control=on`（防链路 -110、关机跳过 SYNCHRONIZE CACHE） | ✅ |
 | `ufs-nopm.service` | QCOM 私有低功耗开关：`rpm_lvl=0`、`clkgate_enable=0`、`clkscale_enable=0`（与上一条**互补不重复**） | ✅ |
 | `crux-charger-init.service` | 开机设置 SMB5 充电电流 ICHG | ✅ |
@@ -51,6 +51,7 @@
 | `qcom-subsys-start.service` + `.timer` | 拉 **mpss / cdsp / slpi** 三个远端子系统 + adsp（内置，不自动 boot）；timer 在开机 20s 兜底 | ✅ |
 | `modem-mnt.service` | 把 modem(NON-HLOS) 分区只读挂到 `/mnt/mdmpart`，并把 `image/modem_pr` 链到固件目录（tqftpserv 用） | ✅ |
 | `crux-kmsg-tap.service` / `dmesg-snap.service` / `power-snap.service` | 内核日志落盘 / dmesg 尾部快照 / 电源状态快照（全是排障用，常驻） | ✅ |
+| `/etc/crux-swap.conf` | 交换空间开关（不是 unit）：`LROOT_SWAP=0` 默认只 zram；`=1` 才在 `/mnt/lroot` 上建 8G swapfile | — |
 
 ### 2.2 用户态程序（`overlay/usr/local/`）
 
@@ -175,6 +176,16 @@ rmtfs/tqftpserv/ModemManager/modem-mnt 常驻、**NPU（`/dev/msm_npu` + `npu-sv
 - `npu-boot.service` 在设备原版里指向 `/root/npu_test/npu_boot24.ko`；**本仓库版已改为 `/usr/lib/modules/$(uname -r)/extra/npu_boot24.ko`**，不再依赖 `/root`
 - `npu-svc` 默认只开 unix socket；需要局域网调用时设 `NPU_SVC_TCP=1`（TCP 5300）
 - 服务之间有顺序依赖：`qrtr-ns` → `pd-mapper`/`tqftpserv` → `rmtfs`/`hexagonrpcd`
-- `crux-swap-setup.sh` 里的 8G swapfile 落在 `/mnt/lroot`（`PARTLABEL=linux-root`，实测 `sda36`）。**若删掉该分区，必须同步改 fstab 与脚本**，否则只剩 zram 4G 交换
+### 交换空间：哪部分是默认开的，哪部分要手动开
+
+| 组成 | 落点 | 默认 | 打开方式 |
+|---|---|---|---|
+| zram 4 GiB（zstd，优先级 100） | 内存压缩，**不依赖任何分区** | ✅ 开 | 无需操作 |
+| 8 GiB swapfile（优先级 10） | `/mnt/lroot`（`PARTLABEL=linux-root`，实测 `sda36` 64G） | ⛔ **关** | `/etc/crux-swap.conf` 里 `LROOT_SWAP=1`，同时 fstab 去掉 `/mnt/lroot` 那行的注释，然后 `systemctl restart crux-swap` |
+
+**为什么默认关**：`sda36` 是可选的第二块盘，可能被删除并入根分区（根分区 24G 那个是 `sda37`）。
+如果开机默认就去挂它，等于把启动路径绑在一块随时可能不存在的盘上。所以脚本和 unit 都改成
+“只有 `LROOT_SWAP=1` 才碰 `/mnt/lroot`”，unit 里也不再有 `Wants=mnt-lroot.mount` 与挂载用的
+`ExecStartPre`。默认路径下 `crux-swap` 只建 zram，`/mnt/lroot` 不存在也完全不影响开机。
 - 基带只保底“四个子系统能起来”：`qcom-subsys-start` 的依赖里已去掉 X50 的 `x50-rfs-persist.service`
 - 本包只是**适配层 + 基础系统**；桌面（KDE）、Docker 等按需自行安装

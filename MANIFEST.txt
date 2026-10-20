@@ -1,6 +1,7 @@
 d01de1eb30010ad311735937972d76a7131f155e3d41535b9f74fdccdb0201ce  modules/msm_qmp.ko
 797506c485b92e87abad7ed97b101f33618b4038fe0ddad0675f837e376dc05e  modules/npu_boot24.ko
 0554e0f4121f6948914f9ad22fa09d6cfa0db71feb11f87af2e77be163464f90  modules/qcom_usb_vbus-regulator.ko
+e149070bbd0987ccdef7826f2a246077c4d155dc648eb40576d15df620733a1e  overlay/etc/crux-swap.conf
 dd0cb703a5acf7c75e845f605c5b77dcaceaaec846d009b8cc697bed779dc67f  overlay/etc/hostname
 6f5f459f26857c880a98b98b6b1ac3eafb60cac5a5ff26dc177781110bc8da3a  overlay/etc/hosts
 9b2cfe3ac8ab192458b6c18d23f5d7ef0c01a0816699db026765d5e7b8737981  overlay/etc/modprobe.d/99-qcom-iris.conf
@@ -23,7 +24,7 @@ a2af086e89e989cae042668bd32c79c2fb8fec8a8fe412311bd8d664ae0ebfd2  overlay/etc/sy
 d9421ae6ace2b189439ffb1a431efa524a9183fd5936883cae01ef89bda517d4  overlay/etc/systemd/system/crux-sensor-adapt.service
 443f47c98c17c9c7347a0647fa24cd83c8958cf55cd5cff65a4c9ca909b2c762  overlay/etc/systemd/system/crux-ssc-registry.service
 93a0b1dc44ea116dfda21c975e8f7008b1e5d9d68dfb8b9d34bfbe260feba5e7  overlay/etc/systemd/system/crux-ssc-registry.service.d/zz-timeout.conf
-ff5453279cca46e4bc4c75a6310004d237f101abc7fc32b0199f2e0c97f479b8  overlay/etc/systemd/system/crux-swap.service
+ade77960d84173c71790d3cc3a912dd4aee7ffe2df58f611befea392413eba71  overlay/etc/systemd/system/crux-swap.service
 93a0b1dc44ea116dfda21c975e8f7008b1e5d9d68dfb8b9d34bfbe260feba5e7  overlay/etc/systemd/system/crux-swap.service.d/zz-timeout.conf
 2883b4907cb130abf38fd84f09f9d970cc5db6376d6d8976a5a50d0feb41d3c7  overlay/etc/systemd/system/crux-time-sync.service
 fa1c66f96191ea2ec2ab745228679baee3b1017e5cae097c2c933225adaed1c4  overlay/etc/systemd/system/crux-time-sync.timer
@@ -84,7 +85,7 @@ a434fe11b6c130199f83e240c491aee631feade30bac0b6a023889eafe7c1e68  overlay/usr/lo
 e43f221c2f612f67d4e3f2976b5d31aefaf95651372aeecc025310da670d19f7  overlay/usr/local/sbin/crux-crashsave.sh
 2dfa7ebf916dac2251a15a54727f3c75e20050170737bca8b91a1b54297a04fc  overlay/usr/local/sbin/crux-markshutdown.sh
 cd79947fab3809062e2f0de5d3754f5227f653106c6cd19afbf3df8b41c66431  overlay/usr/local/sbin/crux-ssc-registry-gen.sh
-24a682cdc7d527949dbe9b086671d27c4b3b21886c260d1204dfdc1b5ee7f175  overlay/usr/local/sbin/crux-swap-setup.sh
+b446c9fb775b793bb8997ffb5fc7fec93f7f1e8e19585f500bdf29f6ecc1e78c  overlay/usr/local/sbin/crux-swap-setup.sh
 91ae6089113c20fc794483d2bcd977040bd18d19427084a9bc01728dde76c1f4  overlay/usr/local/sbin/crux-time-sync.sh
 2dbc0a9736073039b77d2c2e9a9dee9c7c2f441c15c07a8d01f990227c12217c  overlay/usr/local/sbin/crux-ufs-stable.sh
 13dede754098056c3ad559373b1f32aef379b997fb0ef0527945d07e55950062  overlay/usr/local/sbin/dmesg-snap.sh

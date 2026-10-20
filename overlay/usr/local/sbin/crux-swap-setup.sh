@@ -1,7 +1,21 @@
 #!/bin/sh
-# crux swap 布局：zram 4GiB（zstd，优先级高）+ sda36(linux-root) 上 8GiB swapfile = 合计 12GiB
-# 幂等：可重复执行
+# crux swap 布局（幂等，可重复执行）：
+#   1) zram 4GiB（zstd，优先级 100）            —— 默认启用，不依赖任何分区
+#   2) sda36(linux-root) 上的 8GiB swapfile     —— **由开关控制，默认关闭**
+#
+#   开关文件：/etc/crux-swap.conf   里 LROOT_SWAP=1 才启用第 2 项
+#   为什么默认关：这个 swapfile 需要第二块盘（PARTLABEL=linux-root，本机 sda36，64G）。
+#   这块盘不一定存在、也不一定长期保留（可以删掉并入根分区），默认不去碰它，
+#   只用 zram。需要更大交换空间时把 LROOT_SWAP 改成 1 即可。
 set -u
+
+CONF=/etc/crux-swap.conf
+LROOT_SWAP=0
+if [ -r "$CONF" ]; then
+    v=$(sed -n 's/^[[:space:]]*LROOT_SWAP[[:space:]]*=[[:space:]]*//p' "$CONF" | tail -1 | tr -d '[:space:]"'"'"'')
+    [ -n "$v" ] && LROOT_SWAP=$v
+fi
+
 ZRAM_MB=4096
 SWAPDIR=/mnt/lroot
 SWAPFILE=$SWAPDIR/swapfile
@@ -10,6 +24,7 @@ K=$(uname -r)
 E=/lib/modules/$K/extra
 
 log() { echo "[crux-swap] $*"; }
+log "LROOT_SWAP=$LROOT_SWAP (conf: $CONF)"
 
 # ---------- 1) zram ----------
 if [ ! -e /dev/zram0 ]; then
@@ -37,27 +52,32 @@ else
     log "ERROR: no /dev/zram0 (zram module missing?)"
 fi
 
-# ---------- 2) 磁盘 swapfile ----------
-mkdir -p $SWAPDIR
-if ! mountpoint -q $SWAPDIR; then
-    mount /dev/disk/by-partlabel/linux-root $SWAPDIR 2>/dev/null && log "mounted linux-root at $SWAPDIR"
-fi
-if mountpoint -q $SWAPDIR; then
-    if [ ! -f $SWAPFILE ]; then
-        log "creating $SWAPFILE ($SWAPFILE_SIZE) ..."
-        if ! fallocate -l $SWAPFILE_SIZE $SWAPFILE 2>/dev/null; then
-            dd if=/dev/zero of=$SWAPFILE bs=1M count=8192 status=none
-        fi
-        chmod 600 $SWAPFILE
-        mkswap $SWAPFILE >/dev/null
+# ---------- 2) 磁盘 swapfile（受 /etc/crux-swap.conf 的 LROOT_SWAP 开关控制）----------
+if [ "$LROOT_SWAP" = "1" ]; then
+    log "LROOT_SWAP=1 -> 使用 $SWAPDIR 上的 $SWAPFILE_SIZE swapfile"
+    mkdir -p $SWAPDIR
+    if ! mountpoint -q $SWAPDIR; then
+        mount /dev/disk/by-partlabel/linux-root $SWAPDIR 2>/dev/null && log "mounted linux-root at $SWAPDIR"
     fi
-    if ! grep -q " $SWAPFILE " /proc/swaps; then
-        swapon -p 10 $SWAPFILE && log "swapfile 8GiB swapon ok"
+    if mountpoint -q $SWAPDIR; then
+        if [ ! -f $SWAPFILE ]; then
+            log "creating $SWAPFILE ($SWAPFILE_SIZE) ..."
+            if ! fallocate -l $SWAPFILE_SIZE $SWAPFILE 2>/dev/null; then
+                dd if=/dev/zero of=$SWAPFILE bs=1M count=8192 status=none
+            fi
+            chmod 600 $SWAPFILE
+            mkswap $SWAPFILE >/dev/null
+        fi
+        if ! grep -q " $SWAPFILE " /proc/swaps; then
+            swapon -p 10 $SWAPFILE && log "swapfile 8GiB swapon ok"
+        else
+            log "swapfile already in use"
+        fi
     else
-        log "swapfile already in use"
+        log "ERROR: $SWAPDIR not mounted, skip swapfile"
     fi
 else
-    log "ERROR: $SWAPDIR not mounted, skip swapfile"
+    log "LROOT_SWAP=0（默认）：跳过 $SWAPDIR 上的 swapfile，只使用 zram"
 fi
 
 # ---------- 3) 内核参数 ----------
