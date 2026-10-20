@@ -7,7 +7,7 @@ set -euo pipefail
 MODE="auto"
 TAR=""; ROOTDEV=""; ESPDEV=""; EFI=""; KERNEL=""; DTB=""; INITRD=""
 MU=""; LABEL="linux-root"; ROOT_SIZE="24G"; ESP_SIZE="512M"
-MKFS=0; FLASH_MU=1; WAIT_SEC=180
+MKFS=0; FLASH_MU=1; WAIT_SEC=180; DISK_ARG=""
 ROOTMN=/mnt/cruxroot; ESPMN=/mnt/cruxesp
 
 usage() {
@@ -30,6 +30,7 @@ usage() {
   --root-size     新建根分区大小，默认 24G
   --esp-size      新建 ESP 大小，默认 512M
   --wait          等待 USB 盘枚举的秒数，默认 180
+  --disk          指定盘（如 /dev/loop48），跳过 USB 识别
 EOM
 }
 
@@ -49,6 +50,7 @@ while [ $# -gt 0 ]; do
     --root-size) ROOT_SIZE="$2"; shift 2 ;;
     --esp-size) ESP_SIZE="$2"; shift 2 ;;
     --wait) WAIT_SEC="$2"; shift 2 ;;
+    --disk) DISK_ARG="$2"; shift 2 ;;
     --mkfs) MKFS=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "未知参数: $1"; usage; exit 1 ;;
@@ -118,15 +120,20 @@ fi
 
 # 2. 定位 USB 盘
 if [ "$MODE" = "auto" ]; then
-  echo "== 等待 USB mass storage 枚举（最多 ${WAIT_SEC}s）"
-  DISK=""
-  end=$(( $(date +%s) + WAIT_SEC ))
-  while [ "$(date +%s)" -lt "$end" ]; do
-    if DISK="$(find_usb_disk)"; then break; fi
+  if [ -n "$DISK_ARG" ]; then
+    DISK="$(basename "$DISK_ARG")"
+    [ -b "/dev/$DISK" ] || mknod -m 660 "/dev/$DISK" b "$(cat /sys/class/block/$DISK/dev | cut -d: -f1)" "$(cat /sys/class/block/$DISK/dev | cut -d: -f2)"
+  else
+    echo "== 等待 USB mass storage 枚举（最多 ${WAIT_SEC}s）"
     DISK=""
-    sleep 3
-  done
-  [ -n "$DISK" ] || { echo "未找到 USB 盘，确认设备处于 mass 模式后重试"; exit 1; }
+    end=$(( $(date +%s) + WAIT_SEC ))
+    while [ "$(date +%s)" -lt "$end" ]; do
+      if DISK="$(find_usb_disk)"; then break; fi
+      DISK=""
+      sleep 3
+    done
+    [ -n "$DISK" ] || { echo "未找到 USB 盘，确认设备处于 mass 模式后重试"; exit 1; }
+  fi
   echo "== 目标盘 /dev/$DISK ($(cat /sys/class/block/$DISK/size) 扇区)"
   mknode "$DISK" || { echo "无法创建 /dev/$DISK"; exit 1; }
 
@@ -158,14 +165,20 @@ if [ "$MODE" = "auto" ]; then
   ROOTDEV="/dev/$ROOTNAME"
   echo "== ESP $ESPDEV  根分区 $ROOTDEV"
 
-  # 新分区格式化
-  if ! blkid -s TYPE -o value "$ESPDEV" >/dev/null 2>&1; then
+  # 新分区格式化（blkid 对空分区可能返回空串而非非零，按字符串判空）
+  ESPTYPE="$(blkid -s TYPE -o value "$ESPDEV" 2>/dev/null || true)"
+  ROOTTYPE="$(blkid -s TYPE -o value "$ROOTDEV" 2>/dev/null || true)"
+  if [ -z "$ESPTYPE" ]; then
     echo "== 格式化 ESP (vfat)"
     mkfs.vfat -F32 -n EFI "$ESPDEV"
+  else
+    echo "== ESP 已有文件系统: $ESPTYPE（保留）"
   fi
-  if ! blkid -s TYPE -o value "$ROOTDEV" >/dev/null 2>&1 || [ "$MKFS" = "1" ]; then
+  if [ -z "$ROOTTYPE" ] || [ "$MKFS" = "1" ] || [ "$ROOTTYPE" != "ext4" ]; then
     echo "== 格式化根分区 (ext4, 标签 $LABEL)"
     mkfs.ext4 -F -L "$LABEL" "$ROOTDEV"
+  else
+    echo "== 根分区已有 ext4（保留，--mkfs 可强制重格式化）"
   fi
 else
   [ -n "$ROOTDEV" ] && [ -n "$ESPDEV" ] || { echo "缺少 --root / --esp"; exit 1; }
