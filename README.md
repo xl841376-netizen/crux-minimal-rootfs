@@ -2,14 +2,22 @@
 
 主线 Linux（`7.3.0-rc5-crux73`）+ Ubuntu 26.04.1 LTS（`resolute`）aarch64 的设备适配层与构建脚本。
 
-Release 的 `crux-rootfs-resolute-arm64-*.tar.zst` 是完整系统，写入分区即可启动，不需要另行下载 Ubuntu 镜像。
-内核 `Image`、`.dtb`、`initramfs` 与 grub 在 ESP，不在包内。
+## 发布策略
+
+本仓库只公开源码与构建脚本，不对外提供预构建镜像：镜像内含 Qualcomm 专有固件，公开再分发涉及第三方权利。
+本仓库 Release 中的构建产物（含固件的 rootfs、含固件与内核模块的 fw 包）均为 draft，仅仓库维护者可见。
+
+要使用本系统，需要自行完成两步：
+1. 从你自己持有的设备提取固件与内核模块：`tools/fetch-firmware.sh`（详见 §3.2）。
+2. 自行构建镜像：`mkimage.sh --fw-dir <固件目录>`（详见 §3）。
+
+内核 `Image`、`.dtb`、`initramfs` 与 grub 在 ESP，不在 rootfs 包内。
 
 ## 1. 组成
 
 | 层 | 内容 | 本仓库 |
 |---|---|---|
-| L0 基础系统 | Ubuntu 26.04.1 aarch64（systemd、udev、dbus、kmod、apt、openssh、sudo、python3…） | Release 的 tar.zst 已含（debootstrap 生成） |
+| L0 基础系统 | Ubuntu 26.04.1 aarch64（systemd、udev、dbus、kmod、apt、openssh、sudo、python3…） | 构建产物的 tar.zst 已含（debootstrap 生成） |
 | L1 包清单 | 子系统所需的通用 apt 包 | `deps/lists/` |
 | L2 设备适配层 | `overlay/`：systemd 单元、脚本、udev 规则、modprobe/sysctl 配置、UCM、WirePlumber 规则 | ✅ |
 | L3 子系统用户态 | `overlay/usr/local/`：`npu`/`npuctl`/`npu-svc`、`hexagonrpcd`+`libhexagonrpc`/`libqrtr`、`rmtfs`/`tqftpserv`/`pd-mapper` | ✅ |
@@ -52,9 +60,12 @@ MIRROR=http://mirrors.tuna.tsinghua.edu.cn/ubuntu-ports sudo -E ./deps/install-d
 
 ## 3. 安装
 
-### 3.1 用 Release 的包
+### 3.1 刷入自行构建的镜像
 
-最新：`rootfs-20261020-0753`（GitHub Actions 构建，`package_set=sda37`）
+本仓库不对外提供成品镜像：Release 资产均为 draft，仅维护者可见。请先按 §3.2 提取固件并构建，
+产物在 `out/` 下，文件名形如 `crux-rootfs-resolute-arm64-<日期>.tar.zst`。
+
+下列文件名以本地构建产物为准：
 
 | 文件 | 说明 |
 |---|---|

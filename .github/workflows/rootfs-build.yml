@@ -152,9 +152,9 @@ jobs:
         run: |
           set -e
           TAG="rootfs-$(date +%Y%m%d-%H%M)"
-          gh release create "$TAG" \
+          gh release create "$TAG" --draft \
             -t "crux rootfs ${{ inputs.suite }} arm64 (${{ inputs.package_set }})" \
-            -n "云端自动构建。包集=${{ inputs.package_set }}（sda37 时按 deps/lists/sda37.list 全量 1666 包对齐在役机，含 GNOME+gdm3）。产物含固件 + 内核模块 ${{ inputs.kver }}，不含 WiFi 认证数据。
+            -n "云端自动构建。包集=${{ inputs.package_set }}（sda37 时按 deps/lists/sda37.list 全量 1666 包对齐在役机，含 GNOME+gdm3）。draft（仅维护者可见）。产物含固件 + 内核模块 ${{ inputs.kver }}，不含 WiFi 认证数据。
 
           用法：解压到新根分区，改 grub 的 root=UUID，见仓库 README §3.1。
           默认 root 密码 root，登录后请改。" \
