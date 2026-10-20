@@ -222,7 +222,7 @@ find_part() {
 # 从 userdata 尾部释放空间（resize2fs 缩文件系统 → 改小分区 → 留出空隙）
 # 参数：$1=盘名 $2=释放量 返回：FREED_START/FREED_END（可用扇区范围）
 shrink_userdata() {
-  local disk="$1" release="$2" udname udnum uddev start end rel_sec new_end fs_k new_mb minsz
+  local disk="$1" release="$2" udname udnum uddev start end rel_sec new_end ss sec_mb guid before_sz after_sz fs_mb fs_k
   udname="$(find_part "$disk" userdata || true)"
   [ -n "$udname" ] || { echo "未找到 PARTLABEL=userdata"; return 1; }
   udnum="${udname#"$disk"}"
@@ -234,24 +234,34 @@ shrink_userdata() {
     echo "userdata 正在挂载，缩容前需先卸载"; return 1
   fi
 
+  # 扇区单位：sgdisk 用设备逻辑扇区，/sys 用 512 字节，必须按实际逻辑扇区换算
+  ss="$(blockdev --getss "/dev/$disk" 2>/dev/null || echo 512)"
+  [ "$ss" -gt 0 ] 2>/dev/null || ss=512
+  sec_mb=$(( 1048576 / ss ))
+  echo "== 逻辑扇区 ${ss}B（1MiB = ${sec_mb} 扇区）"
+
   start="$(sgdisk -i "$udnum" "/dev/$disk" | awk '/First sector/{print $3}')"
   end="$(sgdisk -i "$udnum" "/dev/$disk" | awk '/Last sector/{print $3}')"
   [ -n "$start" ] && [ -n "$end" ] || { echo "读取 userdata 分区范围失败"; return 1; }
+  guid="$(sgdisk -i "$udnum" "/dev/$disk" | sed -n 's/^Partition unique GUID: //p')"
+  [ -n "$guid" ] || { echo "读取 userdata 分区 GUID 失败"; return 1; }
 
   case "$release" in
-    *[Mm]) rel_sec=$(( ${release%[Mm]} * 2048 )) ;;
-    *[Gg]) rel_sec=$(( ${release%[Gg]} * 2097152 )) ;;
+    *[Mm]) rel_sec=$(( ${release%[Mm]} * sec_mb )) ;;
+    *[Gg]) rel_sec=$(( ${release%[Gg]} * sec_mb * 1024 )) ;;
     *) echo "释放量单位需为 M 或 G"; return 1 ;;
   esac
   new_end=$(( end - rel_sec ))
   if [ "$new_end" -le "$start" ]; then echo "释放量超过 userdata 大小"; return 1; fi
-  fs_k=$(( (new_end - start + 1) * 512 / 1024 ))
+  fs_mb=$(( (new_end - start + 1) * ss / 1048576 - 8 ))
+  [ "$fs_mb" -gt 64 ] || { echo "释放后剩余空间过小（${fs_mb}MiB）"; return 1; }
+  fs_k=$(( fs_mb * 1024 ))
 
-  echo "== userdata 现状: 分区 $start-$end（$(( (end-start+1)/2097152 ))GiB）"
-  echo "== 计划: 缩到 $start-$new_end（约 $(( fs_k / 1048576 ))GiB），释放 ${release}"
-  echo "   resize2fs $uddev $(( fs_k / 1024 ))M"
-  echo "   sgdisk --delete=$udnum /dev/$disk"
-  echo "   sgdisk --new=$udnum:$start:$new_end --typecode=$udnum:A03A --change-name=$udnum:userdata /dev/$disk"
+  echo "== userdata 现状: 分区 $start-$end（$(( (end-start+1)*ss/1073741824 ))GiB）GUID=$guid"
+  echo "== 计划: 缩到 $start-$new_end（约 $(( (new_end-start+1)*ss/1073741824 ))GiB），释放 ${release}"
+  echo "   e2fsck -fp $uddev"
+  echo "   resize2fs $uddev ${fs_mb}M"
+  echo "   sgdisk -d $udnum -n $udnum:$start:$new_end -t $udnum:A03A -c $udnum:userdata -u $udnum:$guid /dev/$disk"
 
   if [ "$APPLY" != "1" ]; then
     echo "== 未加 --apply，仅打印计划"
@@ -260,13 +270,32 @@ shrink_userdata() {
     local bk="/root/gpt-backup-$(basename "$disk")-$(date +%Y%m%d-%H%M%S).bin"
     sgdisk --backup="$bk" "/dev/$disk" >/dev/null
     echo "== GPT 已备份: $bk"
+
+    # e2fsck 有修正时返回 1，不能让它中断脚本
     e2fsck -fp "$uddev" || true
-    resize2fs "$uddev" "$(( fs_k / 1024 ))M"
-    sgdisk --delete="$udnum" "/dev/$disk"
-    sgdisk --new="$udnum:$start:$new_end" --typecode="$udnum:A03A"            --change-name="$udnum:userdata" "/dev/$disk"
+    before_sz="$(cat "/sys/class/block/$udname/size" 2>/dev/null || echo 0)"
+    resize2fs "$uddev" "${fs_mb}M"
+
+    # 一次写入完成删/建/类型/名字/GUID，避免 PARTUUID 变化
+    sgdisk -d "$udnum" \
+           -n "$udnum:$start:$new_end" \
+           -t "$udnum:A03A" \
+           -c "$udnum:userdata" \
+           -u "$udnum:$guid" "/dev/$disk"
+
     partprobe "/dev/$disk" 2>/dev/null || true
-    sleep 2
-    echo "== userdata 缩容完成"
+    for _ in $(seq 1 10); do
+      after_sz="$(cat "/sys/class/block/$udname/size" 2>/dev/null || echo 0)"
+      [ "$after_sz" != "$before_sz" ] && break
+      sleep 1
+    done
+    if [ "$after_sz" = "$before_sz" ]; then
+      echo "== 分区表已改，但内核未重新读取新大小（$before_sz）；可退出 mass 再进一次后重试"
+      return 1
+    fi
+    echo "== userdata 缩容完成：$(( before_sz * 512 / 1073741824 ))GiB -> $(( after_sz * 512 / 1073741824 ))GiB"
+    # 复核文件系统能读
+    e2fsck -fp "$uddev" >/dev/null 2>&1 || echo "   注意：缩后 e2fsck 有非零返回，建议后续再查"
   fi
 
   FREED_START=$(( new_end + 1 ))
