@@ -39,6 +39,7 @@ MIRROR=http://mirrors.tuna.tsinghua.edu.cn/ubuntu-ports sudo -E ./deps/install-d
 |---|---|
 | `overlay/` | 适配层 + 子系统用户态，按 rootfs 绝对路径存放，覆盖到根即可 |
 | `modules/` | out-of-tree 内核模块（装到 `/lib/modules/<kver>/kernel/`） |
+| `src/` | 有源码、可自行修改的私有部件源码（`src/iris-vaapi/`），编译产物按 rootfs 绝对路径放 `overlay/` |
 | `build.sh` | debootstrap → 套 overlay → 装模块 → 启用服务 |
 | `mkimage.sh` | 构建完整 rootfs 包（debootstrap → 装包 → overlay → 固件/模块 → 打包） |
 | `tools/fetch-firmware.sh` | 从设备拉固件与内核模块 |
@@ -46,6 +47,8 @@ MIRROR=http://mirrors.tuna.tsinghua.edu.cn/ubuntu-ports sudo -E ./deps/install-d
 | `MANIFEST.txt` | 文件路径 + sha256 |
 
 不入库：`/root/.ssh/*`、SSH 主机密钥、无线凭据（NM/netplan 里的 PSK）、`/root` 私人材料、日志、固件二进制。
+
+私有部件按有无源码分开存放：无源码、不能改的厂商二进制（固件、闭源驱动）不进本仓库，由内核仓库 `fw_extra/` 与 `fw-<日期>` 资产发布；有源码可改的（如 `iris-vaapi`）源码进 `src/`，预编译产物按绝对路径放 `overlay/`。
 
 ## 3. 安装
 
@@ -189,6 +192,18 @@ sudo ./mkimage.sh /root/out --fw-dir ./fw
 | `msm_qmp.ko` | SM8150 QMP/QRTR 传输 |
 | `npu_boot24.ko` | NPU 上电与启动序列 |
 | `qcom_usb_vbus-regulator.ko` | typec 的 `vdd-vbus-supply` |
+
+### 5.3.1 VA-API 硬解（`src/iris-vaapi/`）
+
+| 项 | 值 |
+|---|---|
+| 源码 | `src/iris-vaapi/`（`make` 生成 `build/vpu_drv_video.so`） |
+| 产物 | `overlay/usr/lib/aarch64-linux-gnu/dri/vpu_drv_video.so` |
+| 环境 | `overlay/etc/environment.d/99-libva-vpu.conf` 设 `LIBVA_DRIVER_NAME=vpu` |
+| 依赖 | 内核 `qcom_iris` + `/dev/video0`；`libva2`/`libva-drm2` |
+| 支持 | H.264 CB/Main/High、HEVC Main/Main10、VP9 P0/P2（VLD） |
+
+改动源码后重编并覆盖 overlay 里那份 `.so`，两端版本保持一致。
 
 ### 5.4 模块 / 内核配置
 
