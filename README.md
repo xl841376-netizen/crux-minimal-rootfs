@@ -2,13 +2,14 @@
 
 主线 Linux（`7.3.0-rc5-crux73`）+ Ubuntu 26.04.1 LTS（`resolute`）aarch64 的设备适配层与构建脚本。
 
-本仓库不含 Ubuntu 本体，也不含内核（`Image` / `.dtb` / `initramfs` 写到 ESP，不在此）。
+Release 的 `crux-rootfs-resolute-arm64-*.tar.zst` 是完整系统，写入分区即可启动，不需要另行下载 Ubuntu 镜像。
+内核 `Image`、`.dtb`、`initramfs` 与 grub 在 ESP，不在包内。
 
 ## 1. 组成
 
 | 层 | 内容 | 本仓库 |
 |---|---|---|
-| L0 基础系统 | Ubuntu 26.04.1 aarch64（systemd、udev、dbus、kmod、apt、openssh、sudo、python3…） | 不含，用 ubuntu-base 或本仓库 `mkimage.sh` 生成 |
+| L0 基础系统 | Ubuntu 26.04.1 aarch64（systemd、udev、dbus、kmod、apt、openssh、sudo、python3…） | Release 的 tar.zst 已含（debootstrap 生成） |
 | L1 包清单 | 子系统所需的通用 apt 包 | `deps/lists/` |
 | L2 设备适配层 | `overlay/`：systemd 单元、脚本、udev 规则、modprobe/sysctl 配置、UCM、WirePlumber 规则 | ✅ |
 | L3 子系统用户态 | `overlay/usr/local/`：`npu`/`npuctl`/`npu-svc`、`hexagonrpcd`+`libhexagonrpc`/`libqrtr`、`rmtfs`/`tqftpserv`/`pd-mapper` | ✅ |
@@ -58,6 +59,18 @@ MIRROR=http://mirrors.tuna.tsinghua.edu.cn/ubuntu-ports sudo -E ./deps/install-d
 | `SHA256SUMS` | `sha256sum -c SHA256SUMS` |
 
 该包内容：包集 `deps/lists/sda37.list`（1666 包，含 GNOME+gdm3、`ibus-libpinyin`、`fonts-noto-cjk`、`docker.io`、`build-essential`）；`/usr/local/bin` 12 个 ELF + `libqrtr.so.1.2`/`libhexagonrpc.so.0.5`；`default.target=graphical.target`，`display-manager.service -> gdm3.service`；用户 `crux`（uid 1000，组 sudo,audio,video,input,render,netdev,dialout,lp,tty，初始密码 `crux`）；时区 Asia/Shanghai，locale zh_CN.UTF-8；内核模块 1652 个；`fstab` 按 `PARTLABEL=linux-root`；不含 WiFi 密码与私钥（CI 校验 `etc/netplan/*.yaml` 为 0）。
+
+一键写入（写系统 + 放 ESP 文件 + 生成菜单）：
+
+```bash
+sudo ./tools/install-to-disk.sh \
+  --tar crux-rootfs-resolute-arm64-20261020.tar.zst \
+  --root /dev/sda36 --esp /dev/sda35 \
+  --efi BOOTAA64.EFI --kernel Image \
+  --dtb sm8150-xiaomi-crux-73.dtb --initrd initramfs.cpio.gz
+```
+
+分区未建立时加 `--mkfs`。手动步骤：
 
 ```bash
 # ① 建根分区（默认标签 linux-root，对应 fstab；换标签用 --root-label 或写盘后改 /etc/fstab）
