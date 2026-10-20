@@ -8,8 +8,7 @@ MODE="auto"
 TAR=""; ROOTDEV=""; ESPDEV=""; EFI=""; KERNEL=""; DTB=""; INITRD=""
 MU=""; LABEL="linux-root"; ROOT_SIZE="24G"; ESP_SIZE="512M"
 MKFS=0; FLASH_MU=1; WAIT_SEC=180; DISK_ARG=""
-FROM_USERDATA=""; APPLY=0; DRY_RUN=0; DO_REBOOT=1
-FROM_USERDATA=""; APPLY=0; DRY_RUN=0; DO_REBOOT=1
+FROM_USERDATA=""; APPLY=0; DRY_RUN=0; DO_REBOOT=1; LAYOUT_ONLY=0
 ROOTMN=/mnt/cruxroot; ESPMN=/mnt/cruxesp
 
 usage() {
@@ -34,6 +33,7 @@ usage() {
   --wait          等待 USB 盘枚举的秒数，默认 180
   --disk          指定盘（如 /dev/loop48），跳过 USB 识别
   --from-userdata 从 userdata 尾部释放空间，例 40G（盘上无其他空闲时使用）
+  --layout        只打印目标盘分区表，不改动任何内容
   --apply         真正执行 userdata 缩容（不带则只打印计划）
   --no-reboot     刷完 Mu 不自动重启
 EOM
@@ -60,19 +60,22 @@ while [ $# -gt 0 ]; do
     --apply) APPLY=1; shift ;;
     --no-reboot) DO_REBOOT=0; shift ;;
     --mkfs) MKFS=1; shift ;;
+    --layout) LAYOUT_ONLY=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "未知参数: $1"; usage; exit 1 ;;
   esac
 done
 
-for v in TAR EFI KERNEL DTB; do
-  [ -n "${!v}" ] || { echo "缺少参数: $v"; usage; exit 1; }
-done
-for f in "$TAR" "$EFI" "$KERNEL" "$DTB"; do
-  [ -f "$f" ] || { echo "文件不存在: $f"; exit 1; }
-done
-if [ -n "$INITRD" ] && [ ! -f "$INITRD" ]; then echo "文件不存在: $INITRD"; exit 1; fi
-if [ -n "$MU" ] && [ ! -f "$MU" ]; then echo "文件不存在: $MU"; exit 1; fi
+if [ "$LAYOUT_ONLY" != "1" ]; then
+  for v in TAR EFI KERNEL DTB; do
+    [ -n "${!v}" ] || { echo "缺少参数: $v"; usage; exit 1; }
+  done
+  for f in "$TAR" "$EFI" "$KERNEL" "$DTB"; do
+    [ -f "$f" ] || { echo "文件不存在: $f"; exit 1; }
+  done
+  if [ -n "$INITRD" ] && [ ! -f "$INITRD" ]; then echo "文件不存在: $INITRD"; exit 1; fi
+  if [ -n "$MU" ] && [ ! -f "$MU" ]; then echo "文件不存在: $MU"; exit 1; fi
+fi
 
 size_ok() {
   case "$1" in
@@ -119,34 +122,43 @@ mknode() {
   [ -b "/dev/$name" ]
 }
 
-# 找一个 USB 附着的 sd 盘（排除宿主自身盘）
-# Mu 的 mass 盘标识：VID:PID 05c6:f000 / Product "USB MASS STORAGE"
-#                   SCSI vendor Qualcomm / model "MMC Storage"，约 476GiB
-find_usb_disk() {
-  local d name real vendor model fallback=""
+# 列出所有 USB 附着的 sd 盘（不预设厂商，谁挂上 USB 就是候选）
+find_usb_disks() {
+  local d name real
   for d in /sys/class/block/sd*; do
     name="$(basename "$d")"
     case "$name" in sd[a-z]) ;; *) continue ;; esac
     [ -e "$d/partition" ] && continue
     real="$(readlink -f "$d/device" 2>/dev/null || true)"
-    case "$real" in *usb*) ;; *) continue ;; esac
-    vendor="$(cat "/sys/block/$name/device/vendor" 2>/dev/null | tr -d ' ')"
-    model="$(cat "/sys/block/$name/device/model" 2>/dev/null | tr -d ' ')"
-    case "${vendor}${model}" in
-      *Qualcomm*MMC*|*MMCStorage*)
-        echo "$name"
-        return 0 ;;
-    esac
-    [ -z "$fallback" ] && fallback="$name"
+    case "$real" in *usb*) echo "$name" ;; esac
   done
-  if [ -n "$fallback" ]; then
-    echo "$fallback"
+}
+
+# 判定某块盘是不是目标设备：直接读它自己的 GPT
+# 命中条件：分区表里有 userdata（或类型 A03A），或同时有 efi 与 linux-root*
+# 结果：0=命中（PROBE_WHY 写原因）；1=不是
+probe_disk() {
+  local disk="$1" tbl
+  PROBE_WHY=""
+  mknode "$disk" || { PROBE_WHY="无块设备节点"; return 1; }
+  tbl="$(sgdisk -p "/dev/$disk" 2>/dev/null || true)"
+  if [ -z "$tbl" ]; then
+    PROBE_WHY="读不到分区表（非 GPT 或无介质）"
+    return 1
+  fi
+  if echo "$tbl" | grep -qiE 'A03A|[[:space:]]userdata$'; then
+    PROBE_WHY="含 userdata 分区"
     return 0
   fi
+  if echo "$tbl" | grep -qiE '[[:space:]]efi$' && echo "$tbl" | grep -qiE 'linux-root'; then
+    PROBE_WHY="含 efi + linux-root"
+    return 0
+  fi
+  PROBE_WHY="分区表里没有 userdata / efi / linux-root"
   return 1
 }
 
-# 打印候选 USB 盘信息（识别失败时用于诊断）
+# 打印候选盘：容量、厂商型号、分区表摘要（诊断用）
 list_usb_disks() {
   local d name real vendor model
   for d in /sys/class/block/sd*; do
@@ -157,9 +169,40 @@ list_usb_disks() {
     case "$real" in *usb*) ;; *) continue ;; esac
     vendor="$(cat "/sys/block/$name/device/vendor" 2>/dev/null | tr -s ' ')"
     model="$(cat "/sys/block/$name/device/model" 2>/dev/null | tr -s ' ')"
-    echo "   /dev/$name  vendor=[$vendor] model=[$model]  $(( $(cat /sys/class/block/$name/size) / 2097152 ))GiB"
+    echo "   /dev/$name  $(( $(cat /sys/class/block/$name/size) / 2097152 ))GiB  vendor=[$vendor] model=[$model]"
+    if mknode "$name" 2>/dev/null; then
+      echo "      分区数: $(sgdisk -p "/dev/$name" 2>/dev/null | grep -cE '^[ ]*[0-9]+[ ]')"
+    fi
   done
 }
+
+# 打印某盘分区表（--layout 只读查看）
+show_layout() {
+  local disk="$1"
+  mknode "$disk" || { echo "无法创建 /dev/$disk"; return 1; }
+  echo "== /dev/$disk 分区表"
+  sgdisk -p "/dev/$disk"
+}
+
+# --layout：只读探测并打印分区表
+if [ "$LAYOUT_ONLY" = "1" ]; then
+  if [ -n "$DISK_ARG" ]; then
+    DISK="$(basename "$DISK_ARG")"
+  else
+    DISK=""
+    for c in $(find_usb_disks || true); do
+      if probe_disk "$c"; then DISK="$c"; echo "== 识别到目标设备 /dev/$c：$PROBE_WHY"; break; fi
+    done
+  fi
+  if [ -z "$DISK" ]; then
+    echo "未找到目标盘。当前可见的 USB 块设备:"
+    list_usb_disks
+    echo "确认盘是对的可用 --disk /dev/sdX 指定"
+    exit 1
+  fi
+  show_layout "$DISK"
+  exit 0
+fi
 
 # 按 PARTLABEL 找分区名
 find_part() {
@@ -255,6 +298,7 @@ fi
 
 # 2. 定位 USB 盘
 if [ "$MODE" = "auto" ]; then
+  LAST_CAND=""
   if [ -n "$DISK_ARG" ]; then
     DISK="$(basename "$DISK_ARG")"
     [ -b "/dev/$DISK" ] || mknod -m 660 "/dev/$DISK" b "$(cat /sys/class/block/$DISK/dev | cut -d: -f1)" "$(cat /sys/class/block/$DISK/dev | cut -d: -f2)"
@@ -264,18 +308,35 @@ if [ "$MODE" = "auto" ]; then
     end=$(( $(date +%s) + WAIT_SEC ))
     tick=0
     while [ "$(date +%s)" -lt "$end" ]; do
-      if DISK="$(find_usb_disk)"; then break; fi
-      DISK=""
+      CAND="$(find_usb_disks || true)"
+      if [ -n "$CAND" ]; then
+        for c in $CAND; do
+          if probe_disk "$c"; then
+            DISK="$c"
+            echo "== 识别到目标设备 /dev/$c：$PROBE_WHY"
+            break
+          fi
+        done
+        [ -n "$DISK" ] && break
+        [ $(( tick % 5 )) -eq 0 ] && echo "   有 USB 盘但尚未确认目标设备（继续等待枚举完成）"
+      fi
       tick=$(( tick + 1 ))
       [ $(( tick % 5 )) -eq 0 ] && echo "   等待中（$(( end - $(date +%s) ))s 剩余）"
       sleep 3
     done
     if [ -z "$DISK" ]; then
-      echo "未找到 USB 盘：确认设备已进 Mu 并选择 mass storage，或用 --wait 延长等待"
-      echo "当前可见的 USB 块设备（应为 Qualcomm / MMC Storage, 约 476GiB）:"
+      echo "未找到可用目标盘：确认设备已进 Mu 并选择 mass storage，或用 --wait 延长等待"
+      echo "当前可见的 USB 块设备:"
       list_usb_disks
-      echo "USB 设备列表（mass 应为 05c6:f000）:"
-      lsusb 2>/dev/null | grep -E '05c6|Mass|Storage' || echo "   （无匹配）"
+      if [ -n "$LAST_CAND" ]; then
+        for c in $LAST_CAND; do
+          echo "   /dev/$c 未通过判定：$PROBE_WHY"
+          show_layout "$c" 2>/dev/null | sed -n '1,8p'
+        done
+      fi
+      echo "USB 设备列表:"
+      lsusb 2>/dev/null || echo "   （lsusb 不可用）"
+      echo "确认盘是对的可用 --disk /dev/sdX 指定"
       exit 1
     fi
   fi
@@ -284,6 +345,11 @@ if [ "$MODE" = "auto" ]; then
   echo "   标识 vendor=[$(cat "/sys/block/$DISK/device/vendor" 2>/dev/null | tr -s ' ')] model=[$(cat "/sys/block/$DISK/device/model" 2>/dev/null | tr -s ' ')]"
   echo "== ESP=$ESP_SIZE  根分区=$ROOT_SIZE"
   mknode "$DISK" || { echo "无法创建 /dev/$DISK"; exit 1; }
+
+  if [ "$LAYOUT_ONLY" = "1" ]; then
+    show_layout "$DISK"
+    exit 0
+  fi
 
   echo "== 阶段 3/3 分区与写入"
 
@@ -388,7 +454,14 @@ mount "$ROOTDEV" "$ROOTMN"
 mount "$ESPDEV" "$ESPMN"
 
 echo "== 解压 rootfs 到根分区"
-tar --zstd -xpf "$TAR" -C "$ROOTMN"
+# 按扩展名选解压方式（Release 产物是 .tar.zst）
+  case "$TAR" in
+    *.zst|*.tzst)     tar --zstd -xpf "$TAR" -C "$ROOTMN" ;;
+    *.gz|*.tgz)       tar -xzpf "$TAR" -C "$ROOTMN" ;;
+    *.xz|*.txz)       tar -xJpf "$TAR" -C "$ROOTMN" ;;
+    *.tar)            tar -xpf "$TAR" -C "$ROOTMN" ;;
+    *) echo "未知压缩格式: $TAR"; exit 1 ;;
+  esac
 
 ROOTUUID="$(blkid -s UUID -o value "$ROOTDEV")"
 PARTLABEL="$(blkid -s PARTLABEL -o value "$ROOTDEV" || true)"
