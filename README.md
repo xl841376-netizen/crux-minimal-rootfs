@@ -127,6 +127,45 @@ speaker-test -t sine -c 2   # 出声验证（前台跑会卡住会话，用 sets
 
 ---
 
+#### 3.1.1 三种写入通路（挑一种）
+
+| 通路 | 前提 | 怎么做 |
+|---|---|---|
+| **① 在已运行的 Linux 里写** | 手上已有一台能起来的 crux/或任何 Linux | `mount /dev/sdaXX /mnt` → `tar --zstd -xpf … -C /mnt` |
+| **② UMS 大容量模式（从 PC 写）** | Android 已 root，或进了 recovery | 设备把整块 UFS 暴露成一个 U 盘，PC 当成普通磁盘分区/写 |
+| **③ dd 整盘镜像** | 手上有 `.img` | `dd if=xxx.img of=/dev/sdX bs=4M status=progress` |
+
+**② UMS 的具体操作**（推荐 PC 侧操作，避免误碰 Android 分区）：
+
+```bash
+# 设备侧（Android，需 root；把整块 sda 暴露成 U 盘）
+modprobe g_mass_storage file=/dev/block/sda removable=1
+# 或者只暴露某一块：file=/dev/block/by-name/linux-root26
+
+# PC 侧（会多出一个 /dev/sdX，先确认大小对得上！）
+lsblk
+sudo sgdisk -n 0:0:+24G -t 0:8300 -c 0:linux-root26 /dev/sdX
+sudo mkfs.ext4 -L linux-root26 /dev/sdX38
+sudo mount /dev/sdX38 /mnt && sudo tar --zstd -xpf crux-rootfs-*.tar.zst -C /mnt
+sudo umount /mnt
+# 收尾（设备侧）
+rmmod g_mass_storage
+```
+
+> **UMS 模式下 PC 看到的是整块盘**，`sgdisk` 改的是设备真实 GPT，所以务必：
+> 只做「追加新分区」，**不要删/改 sda1–sda34**（Android 的 boot/dtbo/vendor/system/userdata 全在那里）。
+
+**③ 与 Android 共存的前提**
+
+| 项 | 说明 |
+|---|---|
+| 分区加密 | Android 的 `userdata`（sda34）若是 FBE/FDE 加密，**Linux 不能直接挂它**。共存 = 给 Linux **单独一个新分区**，不去碰 userdata。不需要解密，也不需要格式化 userdata |
+| 需要"解除加密"的场景 | 只有当你想让 Linux 直接读写 Android 的 /data 时才有意义——本方案**不需要** |
+| 千万别动的分区 | sda1–sda34（含 `super`/`userdata`/`vbmeta`/`boot`）；只往后面追加 `sda38+` |
+| ESP | Linux 的内核/dtb/initramfs 放在 **ESP（sda35, FAT32, 512M）** 的 `EFI/crux/` 下，和 Android 互不影响 |
+| AVB/dm-verity | 新增分区不影响它们；但不要改 `vbmeta`，也不要动 vendor/system 分区的只读属性 |
+| 回退 | 想彻底回 Android：`sgdisk -d <新分区号>` 删掉 Linux 分区，把 ESP 里 `EFI/crux/` 删掉即可，Android 分区一个字节都没动过 |
+
 ### 3.2 方式 B：自己构建
 
 ```bash
