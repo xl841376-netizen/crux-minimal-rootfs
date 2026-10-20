@@ -71,16 +71,8 @@ crux 最小 rootfs 第三方组件版权与许可声明
 说明：GNOME 名称为 GNOME Foundation 的商标，本系统非 GNOME 官方发行版。
 
 --------------------------------------------------------------------
-八、固件（专有二进制，不授予许可）
-组件：/lib/firmware 下的 Qualcomm 平台固件，包括但不限于基带（modem/mpss）、
-      DSP（adsp、cdsp、slpi）、GPU（a630）、视频（venus）、WiFi（WCN3990）等
-权利人：Qualcomm Technologies, Inc. 及其关联公司
-许可：无开源许可。仅随设备使用；本系统不授予任何再分发权利。
-来源：无线电相关的厂商私有部件均从设备原厂固件分区 NON-HLOS（基带固件镜像）中拆出，
-      仅保留运行所需文件后放入 /lib/firmware。
-      设备身份数据（IMEI、EFS/出厂参数、射频校准数据）不在本系统内，
-      由运行时从设备自身分区读取，不参与分发。
-说明：这些文件由使用者从自身持有的设备提取，权利归各自权利人。
+八、固件
+/lib/firmware 下的固件由使用者从自己持有的设备中提取。
 
 --------------------------------------------------------------------
 九、本项目自行编写的组件与外部依赖
@@ -88,9 +80,9 @@ crux 最小 rootfs 第三方组件版权与许可声明
 自写组件：npu、npuctl、npu-svc、crux-npu、crux-connect，以及 overlay 内的 systemd 单元、
           脚本、udev 规则、UCM 配置、sysctl/modprobe 配置
 状态：由本项目作者编写，随本项目提供，不适用第三方开源许可条款。
-运行依赖（均不随本包分发）：
+运行依赖：
 - NPU：本机 /root/npu_test 下自行编译的 msm_npu.ko、npucc-sm8150.ko、ion_compat.ko 与 libnpu_shim.so
-- 原厂 vendor 分区中的 libnpu.so、npu_launcher（Qualcomm 专有二进制，不随本系统分发）
+- 原厂 vendor 分区中的 libnpu.so、npu_launcher
 说明：缺少上述依赖时，NPU 相关命令只提供接口，无法实际执行推理。
 
 --------------------------------------------------------------------
