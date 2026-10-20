@@ -95,6 +95,10 @@ jobs:
         run: |
           set -e
           T=$(ls out/*.tar.zst | head -1)
+          L=/tmp/pkglist.txt
+          tar -tf "$T" > "$L"          # 只解一次，之后全部查清单
+          echo "条目数: $(wc -l < "$L")"
+          miss=0
           for f in ./etc/fstab ./etc/crux-swap.conf ./usr/local/bin/crux-audio-route.sh \
                    ./usr/lib/systemd/system/crux-audio-route.service \
                    ./usr/share/alsa/ucm2/conf.d/sm8150/sm8150.conf \
@@ -106,21 +110,29 @@ jobs:
                    ./usr/sbin/NetworkManager ./usr/bin/pipewire \
                    ./usr/sbin/qsee-supplicant ./usr/sbin/qsee-app-loader \
                    ./usr/local/sbin/crux-swap-setup.sh \
-                   ./usr/sbin/gdm3 ./usr/bin/gnome-shell /usr/share/wayland-sessions/ubuntu.desktop \
-                   ./usr/local/bin/tqftpserv ./usr/local/bin/hexagonrpcd ./usr/local/lib/libqrtr.so.1 \
+                   ./usr/sbin/gdm3 ./usr/bin/gnome-shell \
+                   ./usr/share/wayland-sessions/ubuntu.desktop \
+                   ./usr/local/bin/tqftpserv ./usr/local/bin/hexagonrpcd \
+                   ./usr/local/lib/libqrtr.so.1 \
                    ./usr/local/bin/pd-mapper ./usr/local/bin/rmtfs \
                    ./etc/NetworkManager/conf.d/unmanaged-usb0.conf; do
-            tar -tf "$T" | grep -qx -- "$f" || { echo "包内缺少 $f"; exit 1; }
+            if grep -qx -- "$f" "$L"; then
+              echo "  OK   $f"
+            else
+              echo "  MISS $f"; miss=$((miss+1))
+            fi
           done
-          echo "启用链接数: $(tar -tf "$T" | grep -c 'multi-user.target.wants')"
-          echo "x50 误启用: $(tar -tf "$T" | grep 'x50' | grep -c wants || true)"
-          # 产物不得包含 WiFi 认证数据（netplan yaml 必须为 0）
-          n=$(tar -tf "$T" | grep -c 'etc/netplan/.*\.yaml' || true)
+          [ "$miss" = "0" ] || { echo "!! 缺失 $miss 项"; exit 1; }
+          echo "启用链接数: $(grep -c 'multi-user.target.wants' "$L" || true)"
+          echo "x50 误启用: $(grep 'x50' "$L" | grep -c wants || true)"
+          # 产物不得包含 WiFi 认证数据
+          n=$(grep -c 'etc/netplan/.*\.yaml' "$L" || true)
           echo "netplan yaml 数量（应为 0）: $n"
           [ "$n" = "0" ] || { echo "!! 产物里含 WiFi 认证数据"; exit 1; }
-          echo "模块 ko 数: $(tar -tf "$T" | grep -c 'modules/.*\.ko$' || true)"
-          echo "extra 目录条目（应为 0）: $(tar -tf "$T" | grep -c 'modules/.*/extra/' || true)"
-          echo "gnome-shell 文件数: $(tar -tf "$T" | grep -c 'usr/share/gnome-shell' || true)"
+          echo "模块 ko 数: $(grep -c 'modules/.*\.ko$' "$L" || true)"
+          echo "extra 目录条目（应为 0）: $(grep -c 'modules/.*/extra/' "$L" || true)"
+          echo "gnome-shell 文件数: $(grep -c 'usr/share/gnome-shell' "$L" || true)"
+          echo "home/crux 存在: $(grep -c '^\./home/crux' "$L" || true)"
 
       - uses: actions/upload-artifact@v4
         if: ${{ !inputs.publish_release }}
