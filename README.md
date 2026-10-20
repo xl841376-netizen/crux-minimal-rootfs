@@ -58,6 +58,8 @@ sudo ./deps/install-deps.sh standard
 | `overlay/` | **设备适配层 + 子系统专属用户态**，按 rootfs 绝对路径存放，直接覆盖到根即可 |
 | `modules/` | 设备专用 out-of-tree 内核模块（装到 `/usr/lib/modules/<kver>/extra/`） |
 | `build.sh` | 从 Ubuntu 最小系统重建（debootstrap → 套 overlay → 装模块 → 启用服务）。**只是备选路径**，正常装机用 §3 |
+| `mkimage.sh` | **一键构建完整 rootfs 包**（debootstrap → 装包 → overlay → 固件/模块 → 打包） |
+| `tools/fetch-firmware.sh` | 从在役设备拉固件与内核模块（厂商专有文件，不进仓库） |
 | `deps/` | **L1 基础包的分级清单**（`lists/{minimal,standard,full}.list`）+ 在线安装脚本 + 离线 deb 打包脚本 |
 | `MANIFEST.txt` | 全部文件的路径 + sha256 |
 
@@ -67,73 +69,90 @@ sudo ./deps/install-deps.sh standard
 
 ## 3. 怎么装
 
-三步：**① 新建一个分区 → ② 把 Ubuntu 官方的 rootfs 写进去 → ③ 把本仓库的适配层叠上去。**
+两种方式，**推荐第一种**：
 
-> 说明：本仓库**不提供系统镜像**。第②步下的是 Ubuntu 官方 aarch64 rootfs（或官方镜像），
-> 第③步才是“这台机器专用的那部分”。
+| 方式 | 你要做的事 | 适合 |
+|---|---|---|
+| **A. 用现成的包** | 下载一个 `tar.zst`，解压到新根分区，改 grub 的 `root=` | 想尽快开机 |
+| B. 自己构建 | `./tools/fetch-firmware.sh` + `sudo ./mkimage.sh` | 想改包清单 / 追新版 |
 
-### ① 新建分区
+> **这个包不含内核。** 内核 `Image`、设备树 `.dtb`、`initramfs.cpio.gz` 和 `grub.cfg`
+> 是另外单独写到 **ESP（eFI 分区）** 的，由 grub 引导。包里只有"根分区该有的东西"。
+
+---
+
+### 3.1 方式 A：用现成的包（最快）
+
+**Release 页面**下载两个文件：
+
+| 文件 | 说明 |
+|---|---|
+| `crux-rootfs-resolute-arm64-YYYYMMDD.tar.zst` | 约 362 MB，解压后约 1.2 GB |
+| `SHA256SUMS` | 校验用 |
+
+包里已经含：Ubuntu 26.04.1 基础系统 + L1 `standard` 全套包 + 本仓库 overlay（167 个文件）
++ 内核模块 `7.3.0-rc5-crux73` + 固件（`qcom/sm8150/xiaomi/crux`、`ath10k/WCN3990`、`qcom/sdx50m` 等 1184 个文件）
++ 27 个单元和 2 个定时器已 `enable`。**解压完就能开机，不用再装任何东西。**
 
 ```bash
-# 示例：在 /dev/sda 上开一个 24G 分区
-sudo sgdisk -n 0:0:+24G -t 0:8300 -c 0:cruxroot /dev/sda
-sudo mkfs.ext4 -L cruxroot /dev/sda38          # 分区号以实际为准
+# ① 建一个根分区（标签必须叫 linux-root26，fstab 里就是按这个找的）
+sudo sgdisk -n 0:0:+24G -t 0:8300 -c 0:linux-root26 /dev/sda
+sudo mkfs.ext4 -L linux-root26 /dev/sda38      # 分区号以 sgdisk 输出为准
+
+# ② 解压 = 写系统（这就是全部）
 sudo mount /dev/sda38 /mnt
+sudo tar --zstd -xpf crux-rootfs-resolute-arm64-20261020.tar.zst -C /mnt
+sudo sync && sudo umount /mnt
+
+# ③ 让 grub 指向这个分区
+sudo blkid -s UUID -o value /dev/sda38         # 记下 UUID
 ```
 
-### ② 下载 Ubuntu 官方 rootfs 并写入这个分区
+ESP 上的 `EFI/crux/grub.cfg` 里把 `root=` 改成这个 UUID（其余沿用现有条目）：
+
+```
+linux (hd0,gpt35)/EFI/crux/Image74 root=UUID=<上面那个UUID> rootwait rw ...
+```
+
+ESP 那边需要已有：`Image`（内核）、`*.dtb`（设备树）、`initramfs.cpio.gz`、`grub.cfg`。
+这些**不在本包里**，是另一件事。
+
+**首次开机后**：
 
 ```bash
-# 官方 aarch64 基础系统（选与设备匹配的版本；这里以 26.04/resolute 为例）
-#   https://cdimage.ubuntu.com/ubuntu-base/releases/
-#   ubuntu-base-26.04-base-arm64.tar.gz
-sudo tar xzf ubuntu-base-26.04-base-arm64.tar.gz -C /mnt
+passwd                      # root 默认密码 root，务必改掉
+ls /sys/class/net            # wlan0 应在；NetworkManager 起来后 nmcli 连网
+speaker-test -t sine -c 2   # 出声验证（前台跑会卡住会话，用 setsid nohup）
 ```
 
-（如果你手上是 Ubuntu 官方的 arm64 整盘镜像，也可以直接 `dd if=…img of=/dev/sda38 bs=4M status=progress`，
-但那样会连官方的分区表一起写进去，注意别盖到 ESP。）
+---
 
-### ③ 叠加本仓库的适配层
+### 3.2 方式 B：自己构建
 
 ```bash
-cd crux-minimal-rootfs
-sudo tar -C /mnt -cf - --exclude='*.bak*' -C overlay . | sudo tar -C /mnt -xf -
-sudo mkdir -p /mnt/usr/lib/modules/$(uname -r)/extra
-sudo cp modules/*.ko /mnt/usr/lib/modules/$(uname -r)/extra/
+# 1) 从在役设备拉固件与内核模块（厂商专有文件，不在仓库里）
+./tools/fetch-firmware.sh root@192.168.1.240 ./fw
+#    → ./fw/firmware/（约 417MB）  ./fw/modules/（约 363MB）
+
+# 2) 构建（约 10 分钟，需要联网 + root）
+sudo ./mkimage.sh /root/out --fw-dir ./fw
+#    可调：--level minimal|standard|full   --suite resolute   --mirror <国内镜像>
+#          --kver 7.3.0-rc5-crux73         --no-fw（只出干净系统+适配层）
 ```
 
-然后启用本机服务（只列基础那条链，SIM/X50 不在内）：
+产物同样是 `crux-rootfs-<suite>-arm64-<日期>.tar.zst` + `SHA256SUMS`，装法同 3.1。
 
-```bash
-for u in rmtfs tqftpserv pd-mapper hexagonrpcd-sdsp crux-ssc-registry iris-vpu npu-svc \
-         crux-fastrpc-guard crux-touch-watchdog usb-gadget-acm usb-align qsee-supplicant \
-         modem-mnt qcom-subsys-start crux-audio-route crux-time-sync crux-swap \
-         crux-ufs-stable ufs-nopm crux-charger-init crux-crashsave crux-markshutdown \
-         crux-kmsg-tap dmesg-snap power-snap; do
-  sudo systemctl --root=/mnt enable $u.service
-done
-for t in crux-time-sync.timer qcom-subsys-start.timer; do
-  sudo systemctl --root=/mnt enable $t
-done
-```
+`mkimage.sh` 干的事：`debootstrap minbase` → 按 `deps/lists/<level>.list` 装包 →
+套 `overlay/` → 放固件和模块 → 写 `fstab`/`hostname`/root 密码 → `systemctl --root` 启用单元 → 打包。
 
-### ④ 两处必须对上的地方
+---
 
-1. **`/mnt/etc/fstab`**：`UUID=$(blkid -s UUID -o value /dev/sda38) / ext4 defaults,noatime 0 1`
-2. **ESP 上的 `EFI/crux/grub.cfg`**：`linux (…)/EFI/crux/Image74 … root=UUID=<同一个> rootwait`
+### 3.3 一定要对上的三件事
 
-### ⑤ 首次开机补 L1 必备包
-
-用仓库里的分级清单，一条命令（详见 §1.1）：
-
-```bash
-cd crux-minimal-rootfs
-sudo ./deps/install-deps.sh standard     # 音频+网络/SSH+基带用户态，约 64MB 下载
-# MIRROR=http://mirrors.tuna.tsinghua.edu.cn/ubuntu-ports sudo -E ./deps/install-deps.sh standard
-```
-
-再把 `/lib/firmware` 补齐（`qcom/sm8150/xiaomi/crux/*.mbn`、`ath10k/WCN3990/hw1.0/*`、
-`qcom/sdx50m/*`、`regulatory.db`），来源是设备原厂分区或官方刷机包。
+1. **`/etc/fstab`**：`PARTLABEL=linux-root26  /  ext4 ...`（分区标签改了就要同步改这里）
+2. **grub 的 `root=`**：指向上面的分区 UUID
+3. **`/lib/modules/` 的版本号**要和 ESP 上那个内核的 `uname -r` 一致，否则模块全不加载
+   （包里是 `7.3.0-rc5-crux73`；用别的内核就在构建时加 `--kver <版本>`）
 
 ---
 
