@@ -8,8 +8,8 @@ MODE="auto"
 TAR=""; ROOTDEV=""; ESPDEV=""; EFI=""; KERNEL=""; DTB=""; INITRD=""
 MU=""; LABEL="linux-root"; ROOT_SIZE="24G"; ESP_SIZE="512M"
 MKFS=0; FLASH_MU=1; WAIT_SEC=180; DISK_ARG=""
-FROM_USERDATA=""; APPLY=0; DRY_RUN=0
-FROM_USERDATA=""; APPLY=0; DRY_RUN=0
+FROM_USERDATA=""; APPLY=0; DRY_RUN=0; DO_REBOOT=1
+FROM_USERDATA=""; APPLY=0; DRY_RUN=0; DO_REBOOT=1
 ROOTMN=/mnt/cruxroot; ESPMN=/mnt/cruxesp
 
 usage() {
@@ -35,8 +35,10 @@ usage() {
   --disk          指定盘（如 /dev/loop48），跳过 USB 识别
   --from-userdata 从 userdata 尾部释放空间，例 40G（盘上无其他空闲时使用）
   --apply         真正执行 userdata 缩容（不带则只打印计划）
+  --no-reboot     刷完 Mu 不自动重启
   --from-userdata 从 userdata 尾部释放空间，例 40G（盘上无其他空闲时使用）
   --apply         真正执行 userdata 缩容（不带则只打印计划）
+  --no-reboot     刷完 Mu 不自动重启
 EOM
 }
 
@@ -59,8 +61,10 @@ while [ $# -gt 0 ]; do
     --disk) DISK_ARG="$2"; shift 2 ;;
     --from-userdata) FROM_USERDATA="$2"; shift 2 ;;
     --apply) APPLY=1; shift ;;
+    --no-reboot) DO_REBOOT=0; shift ;;
     --from-userdata) FROM_USERDATA="$2"; shift 2 ;;
     --apply) APPLY=1; shift ;;
+    --no-reboot) DO_REBOOT=0; shift ;;
     --mkfs) MKFS=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "未知参数: $1"; usage; exit 1 ;;
@@ -202,14 +206,28 @@ shrink_userdata() {
   return 0
 }
 
-# 1. fastboot 刷 Mu
+# 1. fastboot 阶段：刷 Mu 固件 → 重启 → 进 Mu 界面切 mass
 if [ "$MODE" = "auto" ] && [ "$FLASH_MU" = "1" ] && [ -n "$MU" ]; then
   if fastboot devices 2>/dev/null | grep -q .; then
-    echo "== fastboot flash boot $MU"
+    echo "== 阶段 1/3 fastboot：flash boot $MU"
     fastboot flash boot "$MU"
+    if [ "$DO_REBOOT" = "1" ]; then
+      echo "== fastboot reboot"
+      fastboot reboot || true
+      echo "== 等待 fastboot 设备退出"
+      for _ in $(seq 1 30); do
+        fastboot devices 2>/dev/null | grep -q . || break
+        sleep 2
+      done
+      echo "== 设备重启进入 Mu；在 Mu 界面选择 mass storage（USB 大容量存储）"
+    else
+      echo "== 已刷入，未重启（--no-reboot）"
+    fi
   else
-    echo "== 未检测到 fastboot 设备，跳过 Mu 刷入"
+    echo "== 阶段 1/3 fastboot：未检测到 fastboot 设备，跳过 Mu 刷入"
   fi
+else
+  echo "== 阶段 1/3 fastboot：跳过（未提供 --mu 或已禁用）"
 fi
 
 # 2. 定位 USB 盘
@@ -218,22 +236,27 @@ if [ "$MODE" = "auto" ]; then
     DISK="$(basename "$DISK_ARG")"
     [ -b "/dev/$DISK" ] || mknod -m 660 "/dev/$DISK" b "$(cat /sys/class/block/$DISK/dev | cut -d: -f1)" "$(cat /sys/class/block/$DISK/dev | cut -d: -f2)"
   else
-    echo "== 等待 USB mass storage 枚举（最多 ${WAIT_SEC}s）"
+    echo "== 阶段 2/3 等待 USB mass storage 枚举（最多 ${WAIT_SEC}s）"
     DISK=""
     end=$(( $(date +%s) + WAIT_SEC ))
+    tick=0
     while [ "$(date +%s)" -lt "$end" ]; do
       if DISK="$(find_usb_disk)"; then break; fi
       DISK=""
+      tick=$(( tick + 1 ))
+      [ $(( tick % 5 )) -eq 0 ] && echo "   等待中（$(( end - $(date +%s) ))s 剩余）"
       sleep 3
     done
-    [ -n "$DISK" ] || { echo "未找到 USB 盘，确认设备处于 mass 模式后重试"; exit 1; }
+    [ -n "$DISK" ] || { echo "未找到 USB 盘：确认设备已进 Mu 并选择 mass storage，或用 --wait 延长等待"; exit 1; }
   fi
   BLOCKS="$(cat /sys/class/block/$DISK/size)"
   echo "== 目标盘 /dev/$DISK 容量 $(( BLOCKS / 2097152 ))GiB（$BLOCKS 扇区）"
   echo "== ESP=$ESP_SIZE  根分区=$ROOT_SIZE"
   mknode "$DISK" || { echo "无法创建 /dev/$DISK"; exit 1; }
 
-  # 3. 空间来源：盘上无空闲时从 userdata 尾部切
+  echo "== 阶段 3/3 分区与写入"
+
+  # 空间来源：盘上无空闲时从 userdata 尾部切
   ESPNAME="$(find_part "$DISK" efi || true)"
   ROOTNAME="$(find_part "$DISK" "$LABEL" || true)"
   FREESTART=""; FREEEND=""
