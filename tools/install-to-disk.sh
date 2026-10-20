@@ -36,9 +36,6 @@ usage() {
   --from-userdata 从 userdata 尾部释放空间，例 40G（盘上无其他空闲时使用）
   --apply         真正执行 userdata 缩容（不带则只打印计划）
   --no-reboot     刷完 Mu 不自动重启
-  --from-userdata 从 userdata 尾部释放空间，例 40G（盘上无其他空闲时使用）
-  --apply         真正执行 userdata 缩容（不带则只打印计划）
-  --no-reboot     刷完 Mu 不自动重启
 EOM
 }
 
@@ -59,9 +56,6 @@ while [ $# -gt 0 ]; do
     --esp-size) ESP_SIZE="$2"; shift 2 ;;
     --wait) WAIT_SEC="$2"; shift 2 ;;
     --disk) DISK_ARG="$2"; shift 2 ;;
-    --from-userdata) FROM_USERDATA="$2"; shift 2 ;;
-    --apply) APPLY=1; shift ;;
-    --no-reboot) DO_REBOOT=0; shift ;;
     --from-userdata) FROM_USERDATA="$2"; shift 2 ;;
     --apply) APPLY=1; shift ;;
     --no-reboot) DO_REBOOT=0; shift ;;
