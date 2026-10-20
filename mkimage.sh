@@ -25,6 +25,9 @@ SUITE=resolute
 MIRROR=http://mirrors.tuna.tsinghua.edu.cn/ubuntu-ports
 LEVEL=standard
 KVER=7.3.0-rc5-crux73
+ARCH=arm64
+SELECTIONS=""          # --selections <文件>：按 dpkg 包清单安装（优先于 --level）
+PRIVATE_DIR=""         # --private <目录>：私有配置（WiFi 密码、ssh 公钥等），不入库
 FW_DIR=""
 WITH_FW=1
 ROOT_PASS=${ROOT_PASS:-root}
@@ -36,6 +39,8 @@ while [ $# -gt 0 ]; do
     --level) LEVEL=$2; shift 2;;
     --kver) KVER=$2; shift 2;;
     --fw-dir) FW_DIR=$2; shift 2;;
+    --selections) SELECTIONS=$2; shift 2;;
+    --private) PRIVATE_DIR=$2; shift 2;;
     --no-fw) WITH_FW=0; shift;;
     -h|--help) sed -n '2,22p' "$0"; exit 0;;
     *) echo "未知参数: $1"; exit 1;;
@@ -44,9 +49,16 @@ done
 
 [ "$(id -u)" = 0 ] || { echo "需要 root"; exit 1; }
 command -v debootstrap >/dev/null || { echo "缺 debootstrap: apt-get install -y debootstrap zstd"; exit 1; }
-LIST="$HERE/deps/lists/$LEVEL.list"
-[ -f "$LIST" ] || { echo "找不到 $LIST"; exit 1; }
-PKGS=$(grep -vE '^[[:space:]]*(#|$)' "$LIST" | tr '\n' ' ')
+if [ -n "$SELECTIONS" ]; then
+  [ -f "$SELECTIONS" ] || { echo "找不到包清单 $SELECTIONS"; exit 1; }
+  echo "== 包来源: selections ($SELECTIONS)"
+  PKGS=$(grep -vE '^[[:space:]]*(#|$)' "$SELECTIONS" | awk '{print $1}' | tr '\n' ' ')
+else
+  LIST="$HERE/deps/lists/$LEVEL.list"
+  [ -f "$LIST" ] || { echo "找不到 $LIST"; exit 1; }
+  echo "== 包来源: level=$LEVEL ($LIST)"
+  PKGS=$(grep -vE '^[[:space:]]*(#|$)' "$LIST" | tr '\n' ' ')
+fi
 
 if [ "$WITH_FW" = 1 ] && [ -z "$FW_DIR" ]; then
   echo "!! 未给 --fw-dir：将生成「无固件/无模块」的包（开机后 WiFi/音频/GPU 不会工作）"
@@ -62,6 +74,10 @@ echo "== [1/6] debootstrap $SUITE/$ARCH minbase"
 debootstrap --arch=arm64 --variant=minbase --include=ca-certificates "$SUITE" "$RFS" "$MIRROR"
 
 echo "== [2/6] 装 L1 必备包（$LEVEL）"
+if [ -n "$SELECTIONS" ]; then
+    echo "   使用包清单: $SELECTIONS（$([ -f "$SELECTIONS" ] && wc -l < "$SELECTIONS" || echo 0) 个包）"
+fi
+
 cat > "$RFS/etc/apt/sources.list" <<SL
 deb $MIRROR $SUITE main universe
 deb $MIRROR $SUITE-updates main universe
@@ -69,17 +85,55 @@ SL
 mount --bind /dev "$RFS/dev" 2>/dev/null || true
 mount -t proc proc "$RFS/proc" 2>/dev/null || true
 mount -t sysfs sys "$RFS/sys" 2>/dev/null || true
-chroot "$RFS" /bin/bash -e <<CHROOT
+# 包清单落盘（避免 heredoc 变量提前展开），安装逻辑放进 chroot 内执行
+printf '%s\n' $PKGS > "$RFS/root/_pkgs.txt"
+cat > "$RFS/root/_install_pkgs.sh" <<'EOS'
+#!/bin/bash
 export DEBIAN_FRONTEND=noninteractive LC_ALL=C
 apt-get update -qq
-apt-get install -y --no-install-recommends $PKGS
+PKGS=$(cat /root/_pkgs.txt | tr '\n' ' ')
+echo "   待装包数: $(wc -l < /root/_pkgs.txt)"
+if apt-get install -y --no-install-recommends $PKGS; then
+    echo "   整包安装成功"
+    exit 0
+fi
+echo "   !! 整包安装失败，改为逐包安装（缺失的记录下来）"
+n=0
+: > /root/_missing.txt
+for p in $PKGS; do
+    apt-get install -y --no-install-recommends "$p" >/dev/null 2>&1 || { echo "$p" >> /root/_missing.txt; n=$((n+1)); }
+done
+echo "   逐包安装完成，缺失 $n 个"
+exit 0
+EOS
+chmod +x "$RFS/root/_install_pkgs.sh"
+chroot "$RFS" /bin/bash /root/_install_pkgs.sh || { echo "!! 包安装失败"; exit 1; }
+
+chroot "$RFS" /bin/bash -e <<CHROOT
 apt-get clean
 rm -rf /var/lib/apt/lists/*
 CHROOT
 
+# 把缺失清单带出到输出目录，便于排查
+if [ -s "$RFS/root/_missing.txt" ]; then
+    mkdir -p "$OUT"
+    cp "$RFS/root/_missing.txt" "$OUT/missing-packages.txt"
+    echo "   缺失包清单: $OUT/missing-packages.txt（$(wc -l < "$RFS/root/_missing.txt") 个）"
+fi
+rm -f "$RFS/root/_missing.txt"
+
 echo "== [3/6] 套 overlay/"
 tar -C "$RFS" -cf - --exclude='*.bak*' -C "$HERE/overlay" . | tar -C "$RFS" -xf -
 chmod +x "$RFS"/usr/local/bin/* "$RFS"/usr/local/sbin/* 2>/dev/null || true
+
+# ---- 私有配置（不入库：WiFi 密码 / ssh 公钥 / 机器专属配置）----
+if [ -n "$PRIVATE_DIR" ]; then
+  [ -d "$PRIVATE_DIR" ] || { echo "!! --private 目录不存在: $PRIVATE_DIR"; exit 1; }
+  echo "   套用私有配置: $PRIVATE_DIR"
+  tar -C "$RFS" -cf - -C "$PRIVATE_DIR" . | tar -C "$RFS" -xf -
+  # netplan 里有密码，收权限
+  [ -d "$RFS/etc/netplan" ] && chmod 600 "$RFS"/etc/netplan/*.yaml 2>/dev/null || true
+fi
 
 echo "== [4/6] 固件 + 内核模块"
 if [ "$WITH_FW" = 1 ] && [ -n "$FW_DIR" ]; then
@@ -99,7 +153,7 @@ if [ "$WITH_FW" = 1 ] && [ -n "$FW_DIR" ]; then
   if [ -d "$MOD/extra" ]; then
     moved=0; dropped=0
     for ko in "$MOD/extra"/*.ko; do
-      [ -e "$ko" ] || continue
+      { [ -e "$ko" ] || [ -L "$ko" ]; } || continue
       b=$(basename "$ko")
       case "$b" in
         crux_esoc.ko|npucc-sm8150.ko) dst="$MOD/kernel/drivers/crux" ;;
@@ -107,6 +161,19 @@ if [ "$WITH_FW" = 1 ] && [ -n "$FW_DIR" ]; then
         ipa_mhi_proxy.ko)             dst="$MOD/kernel/drivers/net/ipa" ;;
         *) continue ;;
       esac
+      # 软链（固件资产里常见：extra/xxx.ko -> /lib/modules/<kver>/kernel/...）
+      # 解压后指向构建机绝对路径，会悬空。kernel/ 下通常已有同名实体文件，
+      # 因此软链一律删除（去重），不跟随。
+      if [ -L "$ko" ]; then
+        if [ -e "$dst/$b" ]; then
+          rm -f "$ko"; dropped=$((dropped + 1))
+        else
+          echo "   !! 警告: $b 是软链且 kernel/ 下无同名文件，丢弃（模块可能缺失，请重取固件资产）"
+          rm -f "$ko"; dropped=$((dropped + 1))
+        fi
+        continue
+      fi
+
       if [ -e "$dst/$b" ]; then
         rm -f "$ko"; dropped=$((dropped + 1))
       else
@@ -142,7 +209,30 @@ chroot "$RFS" /bin/bash -c "echo 'root:$ROOT_PASS' | chpasswd"
 sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin yes/' "$RFS/etc/ssh/sshd_config"
 sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/' "$RFS/etc/ssh/sshd_config"
 
-UNITS="rmtfs tqftpserv pd-mapper hexagonrpcd-sdsp crux-ssc-registry iris-vpu npu-svc crux-fastrpc-guard crux-touch-watchdog usb-gadget-acm usb-align qsee-supplicant modem-mnt qcom-subsys-start crux-audio-route crux-time-sync crux-swap crux-ufs-stable ufs-nopm crux-charger-init crux-crashsave crux-markshutdown crux-kmsg-tap dmesg-snap power-snap"
+# ---- crux 用户（桌面登录用；组与在役机器一致）----
+if ! chroot "$RFS" id crux >/dev/null 2>&1; then
+  chroot "$RFS" /bin/bash -c "useradd -m -s /bin/bash -G sudo,audio,video,input,render,netdev,dialout,lp,tty crux && echo 'crux:${CRUX_PASS:-crux}' | chpasswd" \
+    && echo "   已创建用户 crux（组: sudo,audio,video,input,render,netdev,dialout,lp,tty）"
+fi
+
+# ---- 时区 / locale（对齐在役机器）----
+ln -sf /usr/share/zoneinfo/Asia/Shanghai "$RFS/etc/localtime"
+echo Asia/Shanghai > "$RFS/etc/timezone"
+printf 'LANG=zh_CN.UTF-8\nLANGUAGE=zh_CN:zh\n' > "$RFS/etc/default/locale"
+if [ -x "$RFS/usr/sbin/locale-gen" ]; then
+  chroot "$RFS" locale-gen zh_CN.UTF-8 >/dev/null 2>&1 || true
+fi
+
+# ---- 桌面/输入法环境（GNOME + ibus）----
+mkdir -p "$RFS/etc/environment.d"
+cat > "$RFS/etc/environment.d/10-crux-desktop.conf" <<'ENVEOF'
+GTK_IM_MODULE=ibus
+QT_IM_MODULE=ibus
+XMODIFIERS=@im=ibus
+LANG=zh_CN.UTF-8
+ENVEOF
+
+UNITS="gdm3 rmtfs tqftpserv pd-mapper hexagonrpcd-sdsp crux-ssc-registry iris-vpu npu-svc crux-fastrpc-guard crux-touch-watchdog usb-gadget-acm usb-align qsee-supplicant modem-mnt qcom-subsys-start crux-audio-route crux-time-sync crux-swap crux-ufs-stable ufs-nopm crux-charger-init crux-crashsave crux-markshutdown crux-kmsg-tap dmesg-snap power-snap"
 TIMERS="crux-time-sync.timer qcom-subsys-start.timer"
 ok=0; fail=""
 for u in $UNITS; do systemctl --root="$RFS" enable "$u.service" >/dev/null 2>&1 && ok=$((ok+1)) || fail="$fail $u"; done
