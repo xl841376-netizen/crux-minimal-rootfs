@@ -28,6 +28,9 @@ KVER=7.3.0-rc5-crux73
 ARCH=arm64
 SELECTIONS=""          # --selections <文件>：按 dpkg 包清单安装（优先于 --level）
 PRIVATE_DIR=""         # --private <目录>：私有配置（WiFi 密码、ssh 公钥等），不入库
+ROOT_UUID=""           # --root-uuid <uuid>：写入 fstab 的根分区 UUID（优先）
+ROOT_LABEL="linux-root"    # --root-label <label>：无 UUID 时用标签
+FSTAB_ROOT="PARTLABEL=linux-root"
 FW_DIR=""
 WITH_FW=1
 ROOT_PASS=${ROOT_PASS:-root}
@@ -41,6 +44,8 @@ while [ $# -gt 0 ]; do
     --fw-dir) FW_DIR=$2; shift 2;;
     --selections) SELECTIONS=$2; shift 2;;
     --private) PRIVATE_DIR=$2; shift 2;;
+    --root-uuid) ROOT_UUID=$2; shift 2;;
+    --root-label) ROOT_LABEL=$2; shift 2;;
     --no-fw) WITH_FW=0; shift;;
     -h|--help) sed -n '2,22p' "$0"; exit 0;;
     *) echo "未知参数: $1"; exit 1;;
@@ -85,6 +90,13 @@ SL
 mount --bind /dev "$RFS/dev" 2>/dev/null || true
 mount -t proc proc "$RFS/proc" 2>/dev/null || true
 mount -t sysfs sys "$RFS/sys" 2>/dev/null || true
+# 计算 fstab 根分区写法
+if [ -n "$ROOT_UUID" ]; then
+  FSTAB_ROOT="UUID=$ROOT_UUID"
+else
+  FSTAB_ROOT="PARTLABEL=$ROOT_LABEL"
+fi
+
 # 包清单落盘（避免 heredoc 变量提前展开），安装逻辑放进 chroot 内执行
 printf '%s\n' $PKGS > "$RFS/root/_pkgs.txt"
 cat > "$RFS/root/_install_pkgs.sh" <<'EOS'
@@ -197,8 +209,8 @@ fi
 
 echo "== [5/6] 系统配置"
 cat > "$RFS/etc/fstab" <<FSTAB
-# 根分区：写分区时把 PARTLABEL 设成 linux-root26（与在役设备一致）
-PARTLABEL=linux-root26  /  ext4  defaults,noatime,errors=remount-ro  0 1
+# 根分区：优先用 UUID（由 --root-uuid 指定），否则用标签 --root-label
+${FSTAB_ROOT}  /  ext4  defaults,noatime,errors=remount-ro  0 1
 # [可选] 第二块盘用作 8G swapfile 落点（默认不需要，见 /etc/crux-swap.conf）
 # PARTLABEL=linux-root  /mnt/lroot  ext4  defaults,noatime,nofail  0 2
 FSTAB
