@@ -1,0 +1,7 @@
+{
+  "iptables": false,
+  "ip6tables": false,
+  "bridge": "none",
+  "log-driver": "journald",
+  "log-opts": { "tag": "docker/{{.Name}}" }
+}
