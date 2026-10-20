@@ -81,7 +81,9 @@ jobs:
                    ./usr/share/alsa/ucm2/conf.d/sm8150/sm8150.conf \
                    ./usr/lib/modules/${{ inputs.kver }}/extra \
                    ./lib/firmware/ath10k/WCN3990/hw1.0/firmware-5.bin \
-                   ./usr/sbin/NetworkManager ./usr/bin/pipewire; do
+                   ./usr/sbin/NetworkManager ./usr/bin/pipewire \
+                   ./usr/sbin/qsee-supplicant ./usr/sbin/qsee-app-loader \
+                   ./usr/local/sbin/crux-swap-setup.sh; do
             tar -tf "$T" | grep -qx -- "$f" || { echo "包内缺少 $f"; exit 1; }
           done
           echo "启用链接数: $(tar -tf "$T" | grep -c 'multi-user.target.wants')"
