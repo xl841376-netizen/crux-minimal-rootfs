@@ -1,0 +1,15 @@
+[Unit]
+Description=[crux] UFS 稳定性加固（禁自动 hibern8 / 禁 LUN runtime autosuspend）
+Documentation=file:/usr/local/share/crux-ufs-stable/README.txt
+DefaultDependencies=no
+After=local-fs.target
+Before=multi-user.target graphical.target
+ConditionPathExists=/sys/devices/platform/soc@0/1d84000.ufshc
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/crux-ufs-stable.sh
+
+[Install]
+WantedBy=multi-user.target

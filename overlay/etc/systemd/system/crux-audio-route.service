@@ -1,0 +1,11 @@
+[Unit]
+Description=crux audio route (QUAT_MI2S -> CS35L41)
+After=sound.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/crux-audio-route.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

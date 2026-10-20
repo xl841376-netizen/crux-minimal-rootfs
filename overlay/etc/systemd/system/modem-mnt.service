@@ -1,0 +1,13 @@
+[Unit]
+Description=crux: mount modem partition (modem_pr / MCFG catalog for tqftpserv)
+After=local-fs.target
+Before=tqftpserv.service tqftpserv-v3.service
+DefaultDependencies=no
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/crux-mount-modem.sh
+
+[Install]
+WantedBy=multi-user.target

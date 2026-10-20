@@ -1,0 +1,12 @@
+[Unit]
+Description=crux: 开机设置 SMB5 充电电流（ICHG）
+After=systemd-modules-load.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/crux-charger-init.sh
+RemainAfterExit=yes
+TimeoutStartSec=90
+
+[Install]
+WantedBy=multi-user.target

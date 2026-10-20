@@ -1,0 +1,11 @@
+[Unit]
+Description=crux: 定时校时（每 6 小时一次，兜底长时间运行后的漂移）
+
+[Timer]
+OnBootSec=15min
+OnUnitActiveSec=6h
+AccuracySec=1min
+Unit=crux-time-sync.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,13 @@
+[Unit]
+Description=Keep UFS out of low-power states
+DefaultDependencies=no
+After=local-fs.target
+Before=multi-user.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/ufs-nopm.sh
+
+[Install]
+WantedBy=multi-user.target

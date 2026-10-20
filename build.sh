@@ -16,7 +16,13 @@ ROOT_PASS=${ROOT_PASS:-root}
 
 # 需要开机启用的设备适配服务
 UNITS="rmtfs tqftpserv pd-mapper hexagonrpcd-sdsp crux-ssc-registry iris-vpu \
-npu-svc crux-fastrpc-guard crux-touch-watchdog usb-gadget-acm usb-align qsee-supplicant"
+npu-svc crux-fastrpc-guard crux-touch-watchdog usb-gadget-acm usb-align qsee-supplicant \
+modem-mnt qcom-subsys-start crux-audio-route crux-time-sync \
+crux-swap crux-ufs-stable ufs-nopm crux-charger-init crux-crashsave crux-markshutdown \
+crux-kmsg-tap dmesg-snap power-snap"
+
+# 定时器（挂在 timers.target 上）
+TIMERS="crux-time-sync.timer qcom-subsys-start.timer"
 
 need() { command -v "$1" >/dev/null || { echo "缺少 $1，请先 apt-get install -y $2"; exit 1; }; }
 need debootstrap debootstrap
@@ -67,6 +73,10 @@ for u in $UNITS; do
   systemctl --root="$DEST" enable "$u.service" >/dev/null 2>&1 \
     && echo "  enabled $u" || echo "  !! 启用失败: $u"
 done
+for t in $TIMERS; do
+  systemctl --root="$DEST" enable "$t" >/dev/null 2>&1 \
+    && echo "  enabled $t" || echo "  !! 启用失败: $t"
+done
 echo "  （npu-boot.service 默认不启用，需要时手动 systemctl enable）"
 
 echo "== [6/6] 基本配置 =="
@@ -75,6 +85,11 @@ printf '127.0.0.1 localhost\n127.0.1.1 crux\n::1 localhost ip6-localhost ip6-loo
 cat > "$DEST/etc/fstab" <<'EOF'
 # <根分区> 必须是设备的 linux-root* 分区；UUID 用 blkid 查
 # UUID=<在此填写> / ext4 defaults,noatime 0 1
+#
+# [可选] 第二块盘（sda36, PARTLABEL=linux-root 64G）用作 8G swapfile 的落点。
+#        crux-swap.service / crux-swap-setup.sh 依赖这个挂载点；
+#        不写这一行也能开机，但只会剩下 zram 4G 的交换空间。
+# PARTLABEL=linux-root /mnt/lroot ext4 defaults,noatime,nofail 0 2
 EOF
 [ -d "$DEST/root" ] || mkdir -p "$DEST/root"
 mkdir -p "$DEST/root/.ssh"; chmod 700 "$DEST/root/.ssh"

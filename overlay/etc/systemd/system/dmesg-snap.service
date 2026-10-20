@@ -1,0 +1,14 @@
+[Unit]
+Description=dmesg tail snapshot to disk (crash forensics)
+After=local-fs.target
+
+[Service]
+Type=simple
+ExecStartPre=/bin/sh -c "[ -f /var/log/dmesg-snap.txt ] && cp -f /var/log/dmesg-snap.txt /var/log/dmesg-snap.prev.txt || true"
+ExecStart=/usr/local/sbin/dmesg-snap.sh
+Restart=always
+Nice=19
+IOSchedulingClass=idle
+
+[Install]
+WantedBy=multi-user.target

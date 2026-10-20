@@ -1,0 +1,20 @@
+[Unit]
+Description=crux: 开机自动校时（NTP/HTTP Date，成功后回写 RTC）
+Documentation=file:///var/log/crux-time-sync.log
+# 只"希望"网络就绪，不硬等（网络晚到脚本自己会重试）
+Wants=network-online.target
+After=network.target network-online.target
+After=systemd-timesyncd.service
+ConditionDirectoryNotEmpty=/var/log
+
+[Service]
+# Type=simple：脚本在后台自己重试，绝不阻塞 multi-user.target
+Type=simple
+ExecStart=/usr/local/sbin/crux-time-sync.sh
+Restart=no
+TimeoutStartSec=infinity
+Nice=10
+IOSchedulingClass=idle
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,10 @@
+[Unit]
+Description=crux: 开机 20s 后确保 remote 子系统已启动（兜底，不依赖 target 排序）
+
+[Timer]
+OnBootSec=20s
+AccuracySec=1s
+Unit=qcom-subsys-start.service
+
+[Install]
+WantedBy=timers.target

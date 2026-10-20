@@ -1,0 +1,11 @@
+[Unit]
+Description=Save previous boot dmesg tail to ESP for offline reading
+After=dmesg-snap.service local-fs.target
+Wants=dmesg-snap.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/crux-crashsave.sh
+
+[Install]
+WantedBy=multi-user.target

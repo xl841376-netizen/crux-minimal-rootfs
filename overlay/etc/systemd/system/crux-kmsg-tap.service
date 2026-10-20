@@ -1,0 +1,11 @@
+[Unit]
+Description=crux kmsg tap (persist kernel log to /var/log/crux-kmsg.log)
+After=local-fs.target
+[Service]
+Type=simple
+Nice=15
+ExecStart=/usr/local/bin/crux-kmsg-tap.sh
+Restart=always
+RestartSec=2
+[Install]
+WantedBy=multi-user.target

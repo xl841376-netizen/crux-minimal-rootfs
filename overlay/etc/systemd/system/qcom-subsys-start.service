@@ -1,0 +1,23 @@
+[Unit]
+Description=crux: start remote subsystems (mpss/adsp/cdsp) after FS & QMI services ready
+Documentation=file:///var/log/qcom-subsys-start.log
+# 硬依赖：没有 rmtfs 就别想启动 modem（否则 EFS 假 -> 启动即崩 -> SSR 带死整机）
+Requires=rmtfs.service
+Wants=pd-mapper.service tqftpserv.service
+After=local-fs.target remote-fs.target
+After=rmtfs.service pd-mapper.service tqftpserv.service
+# 注意：不要写 After=multi-user.target（同时 WantedBy=它 会构成排序环）
+
+# 注: 本服务只负责拉 mpss/adsp/cdsp/slpi 四个内置子系统；
+#     外挂 X50(sdx50m) 的 x50-* 单元不在此列。
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/qcom-subsys-start.sh
+TimeoutStartSec=240
+# 失败不阻塞其它服务/不触发重启循环
+SuccessExitStatus=0 1
+
+[Install]
+WantedBy=multi-user.target

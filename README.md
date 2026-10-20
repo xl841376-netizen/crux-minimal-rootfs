@@ -3,7 +3,7 @@
 > **Xiaomi Mi 9 Pro 5G（crux / SM8150）** 主线 Linux 用的**最小 rootfs 包**：
 > 一份 Ubuntu 基础系统 + 针对该设备适配过的**全部用户态文件、systemd 服务和内核模块**。
 >
-> 导出时间：**2026-10-11**（取自设备当前实际运行的 rootfs：Ubuntu 26.04.1，内核 7.3.0-rc5）
+> 导出时间：**2026-10-20**（取自设备当前实际运行的 rootfs：Ubuntu 26.04.1，内核 7.3.0-rc5-crux73）
 
 ---
 
@@ -40,6 +40,17 @@
 | `crux-sensor-adapt.service` | 把 hwmon 适配成 `cpu-thermal` 等标准名 | — |
 | `usb-gadget-acm.service` / `usb-align.service` | USB ECM 网卡 gadget + ARP 对齐 | ✅ |
 | `qsee-supplicant.service` / `qsee-app-loader@.service` | Qualcomm TEE 常驻服务 / 应用加载器 | ✅ |
+| `crux-audio-route.service` | 开机把播放路由固定到扬声器通路（`QUAT_MI2S_RX Audio Mixer MultiMedia1=on`）；ASoC FE 没有 BE 时 open 会直接 EINVAL | ✅ |
+| `crux-time-sync.service` + `crux-time-sync.timer` | 开机校时 + 每 6 小时兜底（本机 **RTC 无驱动**，时间会错到 30 天前，apt 立刻报 Release not valid yet） | ✅ |
+| `crux-swap.service` | zram 4G（zstd，优先级 100）+ `/mnt/lroot/swapfile` 8G（优先级 10） | ✅ |
+| `crux-ufs-stable.service` | 标准 sysfs 加固：`auto_hibern8=0`、`clkgate_delay_ms=1000`、各 LUN `power/control=on`（防链路 -110、关机跳过 SYNCHRONIZE CACHE） | ✅ |
+| `ufs-nopm.service` | QCOM 私有低功耗开关：`rpm_lvl=0`、`clkgate_enable=0`、`clkscale_enable=0`（与上一条**互补不重复**） | ✅ |
+| `crux-charger-init.service` | 开机设置 SMB5 充电电流 ICHG | ✅ |
+| `crux-crashsave.service` | 把上一轮 dmesg 尾部写到 ESP（`EFI/crux/LASTBOOT.TXT`、非正常关机时额外 `CRASH.TXT`） | ✅ |
+| `crux-markshutdown.service` | 打“干净关机”标记（`WantedBy=shutdown.target`） | ✅ |
+| `qcom-subsys-start.service` + `.timer` | 拉 **mpss / cdsp / slpi** 三个远端子系统 + adsp（内置，不自动 boot）；timer 在开机 20s 兜底 | ✅ |
+| `modem-mnt.service` | 把 modem(NON-HLOS) 分区只读挂到 `/mnt/mdmpart`，并把 `image/modem_pr` 链到固件目录（tqftpserv 用） | ✅ |
+| `crux-kmsg-tap.service` / `dmesg-snap.service` / `power-snap.service` | 内核日志落盘 / dmesg 尾部快照 / 电源状态快照（全是排障用，常驻） | ✅ |
 
 ### 2.2 用户态程序（`overlay/usr/local/`）
 
@@ -61,6 +72,35 @@
 - `etc/modules-load.d/crux-wifi.conf` → 开机加载 `ath10k_snoc`（WCN3990）
 - `etc/modules-load.d/msm_qmp.conf` → `msm_qmp`
 - `etc/modprobe.d/99-qcom-iris.conf`、`etc/modprobe.d/blacklist-crux-video.conf`
+- `etc/udev/rules.d/99-qcom-iris-dmaheap.rules` → `dma_heap/system` 权限 0666（Chrome 的 VA-API 解码需要，否则回退软解）
+- `etc/sysctl.d/90-ufs-writeback.conf`、`etc/sysctl.d/99-printk-quiet.conf`（dirty 写回参数 / 控制台只留 warning 以上）
+
+### 2.5 音频（2026-10-20 打通，双设备）
+
+| 文件 | 作用 |
+|---|---|
+| `usr/share/alsa/ucm2/conf.d/sm8150/sm8150.conf` | UCM 入口，**Syntax 3**，`SectionUseCase."HiFi"` |
+| `usr/share/alsa/ucm2/conf.d/sm8150/HiFi.conf` | `SectionVerb` 里写播放路由；`Speaker`（优先级 200，QUAT_MI2S→CS35L41）、`Earpiece`（优先级 100，SLIMBUS_0_RX→RX INT0→EAR） |
+| `etc/wireplumber/wireplumber.conf.d/51-crux-fmt.conf` | `node.name = ~alsa_output.*` → 强制 **S16LE / 48k / 2ch** |
+| `etc/wireplumber/wireplumber.conf.d/52-crux-noproaudio.conf` | 关掉 `pro-audio` profile（否则 ACP 默认选它，8ch 无声） |
+| `usr/local/bin/crux-audio-route.sh` + `crux-audio-route.service` | 开机把 BE mixer 打开做保险 |
+
+**出声要同时满足三条，缺一条都是静默失败**（FE 显示 RUNNING、dmesg 无报错、就是没声音）：
+
+1. **ALSA 卡 id 必须等于 UCM 目录名 `sm8150`。** 卡 id 由 dts `&sound { model = "…" }` 的**最后一个词**决定（`sound/core/init.c: retrieve_id_from_card_name()`）；而 `ucm.conf` 里 `Define.V2Name ""` 关闭了按卡名查找，只按驱动名查 `conf.d/`。
+2. **UCM 必须是 Syntax 3、路由写在 `SectionVerb` 的 `EnableSequence`。** 写成 Syntax 4 + `SectionPCM` 会让 ACP 的逐 PCM 探测失败（`_ucmXXXX.hw:0` 打不开）。
+3. **PipeWire 侧必须 S16_LE / 2ch / 48k。** 默认会以 `S24_LE / 8ch` 打开 —— 全程无声且不报错。
+
+排查口诀：先看 `dmesg | grep "no backend DAIs enabled"`（说明 BE mixer 没开），再看 `hw_params` 是不是 `S24_LE / 8ch`。
+
+### 2.6 drop-in 修正（`*.service.d/*.conf`）
+
+| 目标单元 | drop-in | 内容 |
+|---|---|---|
+| `crux-swap` / `crux-ufs-stable` / `crux-charger-init` / `crux-fastrpc-guard` / `crux-ssc-registry` | `zz-timeout.conf` | `TimeoutStartSec=120` |
+| `crux-gpu-iface` / `crux-touch-watchdog` | `10-crux-fast-stop.conf` | `TimeoutStopSec=2s` + `KillMode=control-group` |
+
+少了这些，关机时会白等满 90 秒。
 
 ---
 
@@ -75,8 +115,13 @@ sudo mkdir -p /usr/lib/modules/$(uname -r)/extra
 sudo cp modules/*.ko /usr/lib/modules/$(uname -r)/extra/
 # 启用服务
 for u in rmtfs tqftpserv pd-mapper hexagonrpcd-sdsp crux-ssc-registry iris-vpu \
-         npu-svc crux-fastrpc-guard crux-touch-watchdog usb-gadget-acm usb-align qsee-supplicant; do
+         npu-svc crux-fastrpc-guard crux-touch-watchdog usb-gadget-acm usb-align qsee-supplicant \
+         modem-mnt qcom-subsys-start crux-audio-route crux-time-sync crux-swap crux-ufs-stable \
+         ufs-nopm crux-charger-init crux-crashsave crux-markshutdown crux-kmsg-tap dmesg-snap power-snap; do
   sudo systemctl enable --now $u.service
+done
+for t in crux-time-sync.timer qcom-subsys-start.timer; do
+  sudo systemctl enable --now $t
 done
 ```
 
@@ -112,12 +157,16 @@ make O=build73 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules_install INSTA
 
 > ⚠️ 出厂通用密码只为第一次进系统方便；**登录后第一件事就改掉**：`passwd root`
 
-## 4. 已验证状态（2026-10-11 08:30 设备实测）
+## 4. 已验证状态（2026-10-20 09:30 设备实测）
 
 显示（DSI ea8076，`card0-DSI-1=connected`）、GPU、触摸（`fts`）、按键、UFS、`/vendor`+`/mnt/sys` 只读读取、
-WiFi（`ath10k_snoc`，`wlan0` 关联成功）、四颗 remoteproc（slpi/modem/cdsp/adsp）全 running、
-rmtfs/tqftpserv/ModemManager 常驻、**NPU（`/dev/msm_npu` + `npu-svc` 运行中，实测 InceptionV3 109 层 / 10.31 ms / 92.5%）**、
-视频编解码（`/dev/video0/1`）、26 个 thermal zone 均已就位。
+WiFi（`ath10k_snoc`，`wlan0` 静态 `192.168.1.240`）、四颗 remoteproc（slpi/modem/cdsp/adsp）全 running、
+rmtfs/tqftpserv/ModemManager/modem-mnt 常驻、**NPU（`/dev/msm_npu` + `npu-svc` 运行中，InceptionV3 109 层 / 10.31 ms / 92.5%）**、
+视频编解码（`/dev/video0/1`）、26 个 thermal zone、
+**音频（Speaker + Earpiece 双设备可切、已实听出声，`hw_params = S16_LE/2ch/48000`）**均已就位。
+
+> 基带部分本仓库只保证**内置四个子系统（mpss/adsp/cdsp/slpi）能起来**这条基础链，
+> **不含外挂 X50（sdx50m）那一套**（`x50-*` 单元、`x50-mhi.conf`、`ipa_mhi_proxy.conf` 均未收录）。
 
 ---
 
@@ -126,4 +175,6 @@ rmtfs/tqftpserv/ModemManager 常驻、**NPU（`/dev/msm_npu` + `npu-svc` 运行�
 - `npu-boot.service` 在设备原版里指向 `/root/npu_test/npu_boot24.ko`；**本仓库版已改为 `/usr/lib/modules/$(uname -r)/extra/npu_boot24.ko`**，不再依赖 `/root`
 - `npu-svc` 默认只开 unix socket；需要局域网调用时设 `NPU_SVC_TCP=1`（TCP 5300）
 - 服务之间有顺序依赖：`qrtr-ns` → `pd-mapper`/`tqftpserv` → `rmtfs`/`hexagonrpcd`
+- `crux-swap-setup.sh` 里的 8G swapfile 落在 `/mnt/lroot`（`PARTLABEL=linux-root`，实测 `sda36`）。**若删掉该分区，必须同步改 fstab 与脚本**，否则只剩 zram 4G 交换
+- 基带只保底“四个子系统能起来”：`qcom-subsys-start` 的依赖里已去掉 X50 的 `x50-rfs-persist.service`
 - 本包只是**适配层 + 基础系统**；桌面（KDE）、Docker 等按需自行安装

@@ -1,0 +1,13 @@
+[Unit]
+Description=power/state snapshot for crash forensics
+After=local-fs.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/power-snap.sh
+Restart=always
+Nice=19
+IOSchedulingClass=idle
+
+[Install]
+WantedBy=multi-user.target

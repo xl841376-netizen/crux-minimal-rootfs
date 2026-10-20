@@ -1,0 +1,15 @@
+[Unit]
+Description=crux swap: zram4G (zstd) + 8G swapfile on linux-root
+Wants=mnt-lroot.mount
+After=local-fs.target mnt-lroot.mount
+After=local-fs.target systemd-modules-load.service
+Before=multi-user.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStartPre=/bin/sh -c "mountpoint -q /mnt/lroot || mount /mnt/lroot"
+ExecStart=/usr/local/sbin/crux-swap-setup.sh
+
+[Install]
+WantedBy=multi-user.target
