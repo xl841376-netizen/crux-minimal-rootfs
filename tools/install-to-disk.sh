@@ -358,6 +358,11 @@ if [ -n "$INITRD" ]; then
 fi
 
 echo "== 生成 grub.cfg"
+if [ -f "$ESPMN/EFI/crux/grub.cfg" ]; then
+  BK="$ESPMN/EFI/crux/grub.cfg.bak-$(date +%Y%m%d-%H%M%S)"
+  cp -f "$ESPMN/EFI/crux/grub.cfg" "$BK"
+  echo "   已有菜单已备份: $(basename "$BK")"
+fi
 {
   echo "set timeout=5"
   echo "set default=0"
