@@ -1,14 +1,15 @@
 [Unit]
-Description=crux swap: zram 4G (zstd) + 可选 8G swapfile on linux-root
-# 注意：8G swapfile 那部分由 /etc/crux-swap.conf 的 LROOT_SWAP 开关控制，默认关闭。
-#       关闭时本服务只建 zram，完全不需要第二块盘；因此这里不写
-#       Wants=mnt-lroot.mount / ExecStartPre 挂载，避免默认路径上非挂不可。
+Description=crux swap (params in /etc/crux-swap.conf, default all-off)
+Documentation=file:///etc/crux-swap.conf
 After=local-fs.target systemd-modules-load.service
 Before=multi-user.target
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
+# 说明：不再在这里 mount /mnt/lroot。
+#  /mnt/lroot 只有在 /etc/crux-swap.conf 里 SWAP_ENABLE=1 且 LROOT_SWAP=1 时才有意义，
+#  由 crux-swap-setup.sh 自己按 partlabel 挂载；默认全关时不碰任何分区。
 ExecStart=/usr/local/sbin/crux-swap-setup.sh
 
 [Install]
