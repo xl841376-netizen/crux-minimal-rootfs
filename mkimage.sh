@@ -84,7 +84,6 @@ chmod +x "$RFS"/usr/local/bin/* "$RFS"/usr/local/sbin/* 2>/dev/null || true
 echo "== [4/6] 固件 + 内核模块"
 if [ "$WITH_FW" = 1 ] && [ -n "$FW_DIR" ]; then
   mkdir -p "$RFS/lib/firmware" "$RFS/lib/modules"
-  tar -C "$RFS/lib/firmware" -xf - < /dev/null 2>/dev/null || true
   cp -a "$FW_DIR/firmware/." "$RFS/lib/firmware/"
   cp -a "$FW_DIR/modules/." "$RFS/lib/modules/"
   find "$RFS/lib/modules" "$RFS/lib/firmware" \( -name '*.bak*' -o -name '*.orig' \) -delete

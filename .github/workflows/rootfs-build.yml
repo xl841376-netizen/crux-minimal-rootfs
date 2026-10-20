@@ -1,0 +1,111 @@
+name: rootfs-build
+
+# 独立构建：不需要内核仓库，也不需要连设备。
+# 固件与内核模块从本仓库的 release 资产取（tag: fw-YYYYMMDD）。
+on:
+  workflow_dispatch:
+    inputs:
+      level:
+        description: '基础包档位'
+        required: true
+        default: standard
+        type: choice
+        options: [minimal, standard, full]
+      suite:
+        description: 'Ubuntu 版本'
+        required: true
+        default: resolute
+      fw_tag:
+        description: '固件资产所在的 release tag'
+        required: true
+        default: fw-20261020
+      kver:
+        description: '内核版本号（要等于 fw/modules 下的目录名）'
+        required: true
+        default: 7.3.0-rc5-crux73
+      publish_release:
+        description: '构建成功后发 Release（否则只留 artifact）'
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 90
+    env:
+      MIRROR: http://mirrors.tuna.tsinghua.edu.cn/ubuntu-ports
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装构建依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            debootstrap zstd rsync ca-certificates
+
+      - name: 取固件与内核模块（release 资产）
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          gh release download "${{ inputs.fw_tag }}" \
+            --repo "${{ github.repository }}" \
+            --pattern 'crux-fw-modules-*.tar.zst' --dir .
+          ls -lh crux-fw-modules-*.tar.zst
+          tar --zstd -xf crux-fw-modules-*.tar.zst
+          test -d fw/firmware && test -d fw/modules
+          echo "固件: $(du -sh fw/firmware | cut -f1)   模块: $(du -sh fw/modules | cut -f1)"
+          echo "模块版本目录: $(ls fw/modules)"
+
+      - name: 构建 rootfs 包
+        run: |
+          set -e
+          sudo ./mkimage.sh "$PWD/out" \
+            --fw-dir "$PWD/fw" \
+            --level "${{ inputs.level }}" \
+            --suite "${{ inputs.suite }}" \
+            --mirror "$MIRROR" \
+            --kver "${{ inputs.kver }}"
+          ls -lh out/
+
+      - name: 体检（关键路径必须在包内）
+        run: |
+          set -e
+          T=$(ls out/*.tar.zst | head -1)
+          for f in ./etc/fstab ./etc/crux-swap.conf ./usr/local/bin/crux-audio-route.sh \
+                   ./usr/lib/systemd/system/crux-audio-route.service \
+                   ./usr/share/alsa/ucm2/conf.d/sm8150/sm8150.conf \
+                   ./usr/lib/modules/${{ inputs.kver }}/extra \
+                   ./lib/firmware/ath10k/WCN3990/hw1.0/firmware-5.bin \
+                   ./usr/sbin/NetworkManager ./usr/bin/pipewire; do
+            tar -tf "$T" | grep -qx -- "$f" || { echo "包内缺少 $f"; exit 1; }
+          done
+          echo "启用链接数: $(tar -tf "$T" | grep -c 'multi-user.target.wants')"
+          echo "x50 误启用: $(tar -tf "$T" | grep 'x50' | grep -c wants || true)"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: crux-rootfs-${{ inputs.suite }}-${{ inputs.level }}-${{ github.sha }}
+          path: |
+            out/*.tar.zst
+            out/SHA256SUMS
+          if-no-files-found: error
+
+      - name: 发 Release
+        if: ${{ inputs.publish_release }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          TAG="rootfs-$(date +%Y%m%d-%H%M)"
+          gh release create "$TAG" \
+            -t "crux rootfs ${{ inputs.suite }} arm64 (${{ inputs.level }})" \
+            -n "自动构建。基础系统 + L1 ${{ inputs.level }} + 适配 overlay + 固件 + 内核模块 ${{ inputs.kver }}。
+
+          用法：解压到新根分区，改 grub 的 root=UUID，见仓库 README §3.1。
+          默认 root 密码 root，登录后请改。" \
+            out/*.tar.zst out/SHA256SUMS
