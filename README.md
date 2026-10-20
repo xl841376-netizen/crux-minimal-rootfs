@@ -60,17 +60,19 @@ MIRROR=http://mirrors.tuna.tsinghua.edu.cn/ubuntu-ports sudo -E ./deps/install-d
 
 该包内容：包集 `deps/lists/sda37.list`（1666 包，含 GNOME+gdm3、`ibus-libpinyin`、`fonts-noto-cjk`、`docker.io`、`build-essential`）；`/usr/local/bin` 12 个 ELF + `libqrtr.so.1.2`/`libhexagonrpc.so.0.5`；`default.target=graphical.target`，`display-manager.service -> gdm3.service`；用户 `crux`（uid 1000，组 sudo,audio,video,input,render,netdev,dialout,lp,tty，初始密码 `crux`）；时区 Asia/Shanghai，locale zh_CN.UTF-8；内核模块 1652 个；`fstab` 按 `PARTLABEL=linux-root`；不含 WiFi 密码与私钥（CI 校验 `etc/netplan/*.yaml` 为 0）。
 
-一键写入（写系统 + 放 ESP 文件 + 生成菜单）：
+一键刷入（自动识别 fastboot 与 mass 盘，缺分区时自动创建，写系统与 ESP）：
 
 ```bash
-sudo ./tools/install-to-disk.sh \
+sudo ./tools/install-to-disk.sh --auto \
   --tar crux-rootfs-resolute-arm64-20261020.tar.zst \
-  --root /dev/sda36 --esp /dev/sda35 \
   --efi BOOTAA64.EFI --kernel Image \
-  --dtb sm8150-xiaomi-crux-73.dtb --initrd initramfs.cpio.gz
+  --dtb sm8150-xiaomi-crux-73.dtb --initrd initramfs.cpio.gz \
+  --mu Mu-crux.img --root-size 24G --esp-size 512M
 ```
 
-分区未建立时加 `--mkfs`。手动步骤：
+已知分区时去掉 `--auto`，改用 `--root <分区> --esp <分区>`。
+
+手动步骤：
 
 ```bash
 # ① 建根分区（默认标签 linux-root，对应 fstab；换标签用 --root-label 或写盘后改 /etc/fstab）
