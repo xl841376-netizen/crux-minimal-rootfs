@@ -58,14 +58,14 @@ VA-API 驱动位于 crux-minimal-rootfs 的 src/iris-vaapi/。
 1) 内核：使用镜像内 /boot/config-7.3.0-rc5-crux73 作为 .config，交叉/原生编译 aarch64。
 2) 模块：随内核一同编译（in-tree），不使用外部 dkms。
 3) rootfs：仓库内 mkimage.sh 配合 deps/lists/sda37.list、overlay/、fw/（固件与预编译模块）构建。
-   fw/ 中的固件为专有二进制，不在开源许可范围内，不随源码提供。
+   fw/ 中的固件为专有二进制，不在开源许可范围内。
 4) VA-API：在装有 libva-dev 与 Vulkan 头文件的环境中 make，产物为 build/vpu_drv_video.so，
    放入 /usr/lib/aarch64-linux-gnu/dri/ 并配置 LIBVA_DRIVER_NAME=vpu。
 
 五、不适用本文件的内容
-- 固件（/lib/firmware 下的 Qualcomm 专有二进制）：不属于开源分发范围，不在 GPL 源码义务内。其中无线电相关厂商私有部件均从设备原厂固件分区 NON-HLOS（基带固件镜像）拆出，仅保留运行所需文件；完整 NON-HLOS 不随本系统分发。设备身份数据（IMEI、EFS、射频校准）不参与分发。
+- 固件（/lib/firmware 下的 Qualcomm 专有二进制）：不属于开源分发范围，不在 GPL 源码义务内。其中无线电相关厂商私有部件均从设备原厂固件分区 NON-HLOS（基带固件镜像）拆出，仅保留运行所需文件。设备身份数据（IMEI、EFS、射频校准）不参与分发。
 - Ubuntu 软件包：其源码由 Ubuntu 归档及各自上游提供，可在 /usr/share/doc/<包名>/copyright 查看来源。
-- NPU 用户态依赖（libnpu.so、npu_launcher）为原厂专有二进制，不随本系统分发，不在本说明范围内；
+- NPU 用户态依赖（libnpu.so、npu_launcher）为原厂专有二进制，不在本说明范围内；
   npu、npuctl、npu-svc 为本项目自写脚本，随本项目提供。
 - ssccli（libssc）与 sscregistrygen（hexagonrpc）为 GPLv3 组件，对应源码来源见第一节。
 

@@ -4,10 +4,9 @@
 
 ## 发布策略
 
-本仓库只公开源码与构建脚本，不对外提供预构建镜像：镜像内含 Qualcomm 专有固件，公开再分发涉及第三方权利。
-本仓库 Release 中的构建产物（含固件的 rootfs、含固件与内核模块的 fw 包）均为 draft，仅仓库维护者可见。
+本仓库公开源码与构建脚本。构建产物中含有从设备提取的 Qualcomm 专有固件，其权利归各自权利人。
 
-要使用本系统，需要自行完成两步：
+准备系统时，建议自行完成两步：
 1. 从你自己持有的设备提取固件与内核模块：`tools/fetch-firmware.sh`（详见 §3.2）。
 2. 自行构建镜像：`mkimage.sh --fw-dir <固件目录>`（详见 §3）。
 
@@ -54,15 +53,15 @@ MIRROR=http://mirrors.tuna.tsinghua.edu.cn/ubuntu-ports sudo -E ./deps/install-d
 | `deps/` | 包清单 + 在线安装 / 离线 deb 脚本 |
 | `MANIFEST.txt` | 文件路径 + sha256 |
 
-不入库：`/root/.ssh/*`、SSH 主机密钥、无线凭据（NM/netplan 里的 PSK）、`/root` 私人材料、日志、固件二进制。
+不入库：`/root/.ssh/*`、SSH 主机密钥、无线凭据（NM/netplan 里的 PSK）、`/root` 私人材料、日志。
 
-私有部件按有无源码分开存放：无源码、不能改的厂商二进制（固件、闭源驱动）不进本仓库，由内核仓库 `fw_extra/` 与 `fw-<日期>` 资产发布；有源码可改的（如 `iris-vaapi`）源码进 `src/`，预编译产物按绝对路径放 `overlay/`。
+私有部件按有无源码分开存放：厂商二进制（固件、闭源驱动）由内核仓库 `fw_extra/` 与 `fw-<日期>` 资产发布；有源码可改的（如 `iris-vaapi`）源码进 `src/`，预编译产物按绝对路径放 `overlay/`。
 
 ## 3. 安装
 
 ### 3.1 刷入自行构建的镜像
 
-本仓库不对外提供成品镜像：Release 资产均为 draft，仅维护者可见。请先按 §3.2 提取固件并构建，
+建议先按 §3.2 提取固件并构建，
 产物在 `out/` 下，文件名形如 `crux-rootfs-resolute-arm64-<日期>.tar.zst`。
 
 下列文件名以本地构建产物为准：
