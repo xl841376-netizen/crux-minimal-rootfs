@@ -25,8 +25,8 @@ start(){
   echo 0x0200 > bcdUSB
   mkdir -p strings/0x409
   echo crux   > strings/0x409/serialnumber
-  echo Xiaomi > strings/0x409/manufacturer
-  echo Mi9Pro > strings/0x409/product
+  echo crux > strings/0x409/manufacturer
+  echo crux > strings/0x409/product
   mkdir -p configs/c.1/strings/0x409
   echo "ECM" > configs/c.1/strings/0x409/configuration
   mkdir -p functions/ecm.usb0
