@@ -85,28 +85,40 @@ sudo ./deps/install-deps.sh standard
 
 **Release 页面**下载两个文件：
 
-当前最新（**v2026.10.20-1 修补版**，2026-10-20）：
+当前最新（**`rootfs-20261020-0652`**，云端自动构建，2026-10-20）：
 
 | 文件 | 说明 |
 |---|---|
-| `crux-rootfs-resolute-arm64-20261020-fix2.tar.zst` | 298 MB（解压后约 1.2 GB），sha256 `54085db2…747ce3b` |
-| `SHA256SUMS.fix2` | 校验用 |
+| `crux-rootfs-resolute-arm64-20261020.tar.zst` | 1.43 GB（解压后约 5.2 GB + 固件 417 MB + 模块 361 MB） |
+| `SHA256SUMS` | 校验用（`sha256sum -c SHA256SUMS`） |
 
-> v2026.10.20-1 相对 v2026.10.20 修了 4 处：补 `qsee-supplicant`/`qsee-app-loader` 两个二进制、
-> swap 改全参数化默认全关、ssh 首次启动自动生成 host key、模块路径归一（`extra/` 清空）。
+> 这一版由 **GitHub Actions 自己构建并发布**（`rootfs-build.yml`，`package_set=sda37`），
+> 产物与在役机 sda37 **逐项对齐**：
+>
+> - 包集 = `deps/lists/sda37.list`（1666 个包，取自 sda37 的 `dpkg --get-selections`），
+>   含完整 **GNOME 桌面 + gdm3**、`ubuntu-desktop-minimal`、`ibus-libpinyin`、`fonts-noto-cjk`、
+>   `language-pack-zh-hans`、`docker.io`、`build-essential`；CI 实际安装 1666/1666，无缺失
+> - 本地原生二进制与库已进 overlay：`/usr/local/bin` 的 12 个 ELF（`tqftpserv`、`pd-mapper`、
+>   `rmtfs`、`hexagonrpcd`、`qmisd`、`mdm_helper_native` …）+ `/usr/local/lib`
+>   （`libqrtr.so.1.2`、`libhexagonrpc.so.0.5`），修掉 `tqftpserv` 缺 `libqrtr.so.1`
+> - 默认目标 `graphical.target`，`display-manager.service -> gdm3.service`，`gdm3` 已 enable
+> - 自动创建用户 `crux`（uid 1000，组 sudo,audio,video,input,render,netdev,dialout,lp,tty，
+>   初始密码 `crux`），时区 Asia/Shanghai，locale zh_CN.UTF-8，ibus 输入法环境变量
+> - 内核模块 1652 个，`extra/` 已归一为 0；fstab 按 `PARTLABEL=linux-root`
+> - **不含任何 WiFi 密码 / 私钥**（CI 会校验包内 `etc/netplan/*.yaml` 数量必须为 0）
 
-包里已经含：Ubuntu 26.04.1 基础系统 + L1 `standard` 全套包 + 本仓库 overlay（167 个文件）
-+ 内核模块 `7.3.0-rc5-crux73` + 固件（`qcom/sm8150/xiaomi/crux`、`ath10k/WCN3990`、`qcom/sdx50m` 等 1184 个文件）
-+ 27 个单元和 2 个定时器已 `enable`。**解压完就能开机，不用再装任何东西。**
+> 想在写盘时就把自己的 WiFi 认证数据带进去：用 `--private <目录>`（见 §3.3），
+> 或写盘后 `cp -a` 到 `/etc/netplan/` 并 `chmod 600`。
 
 ```bash
-# ① 建一个根分区（标签必须叫 linux-root26，fstab 里就是按这个找的）
-sudo sgdisk -n 0:0:+24G -t 0:8300 -c 0:linux-root26 /dev/sda
-sudo mkfs.ext4 -L linux-root26 /dev/sda38      # 分区号以 sgdisk 输出为准
+# ① 建一个根分区（默认标签 linux-root，fstab 里就是按这个找的；
+#    若用别的标签，加 --root-label 或写盘后改 /etc/fstab）
+sudo sgdisk -n 0:0:+24G -t 0:8300 -c 0:linux-root /dev/sda
+sudo mkfs.ext4 -L linux-root /dev/sda38        # 分区号以 sgdisk 输出为准
 
 # ② 解压 = 写系统（这就是全部）
 sudo mount /dev/sda38 /mnt
-sudo tar --zstd -xpf crux-rootfs-resolute-arm64-20261020-fix2.tar.zst -C /mnt
+sudo tar --zstd -xpf crux-rootfs-resolute-arm64-20261020.tar.zst -C /mnt
 sudo sync && sudo umount /mnt
 
 # ③ 让 grub 指向这个分区
@@ -145,12 +157,12 @@ speaker-test -t sine -c 2   # 出声验证（前台跑会卡住会话，用 sets
 ```bash
 # 设备侧（Android，需 root；把整块 sda 暴露成 U 盘）
 modprobe g_mass_storage file=/dev/block/sda removable=1
-# 或者只暴露某一块：file=/dev/block/by-name/linux-root26
+# 或者只暴露某一块：file=/dev/block/by-name/linux-root
 
 # PC 侧（会多出一个 /dev/sdX，先确认大小对得上！）
 lsblk
-sudo sgdisk -n 0:0:+24G -t 0:8300 -c 0:linux-root26 /dev/sdX
-sudo mkfs.ext4 -L linux-root26 /dev/sdX38
+sudo sgdisk -n 0:0:+24G -t 0:8300 -c 0:linux-root /dev/sdX
+sudo mkfs.ext4 -L linux-root /dev/sdX38
 sudo mount /dev/sdX38 /mnt && sudo tar --zstd -xpf crux-rootfs-*.tar.zst -C /mnt
 sudo umount /mnt
 # 收尾（设备侧）
