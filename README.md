@@ -212,7 +212,7 @@ sudo ./mkimage.sh /root/out --fw-dir ./fw
 | **内置基带（mpss）** | `modemmanager`、`libqmi-utils`、`libmbim-utils` | `rmtfs`/`tqftpserv`/`pd-mapper`（L3 二进制 + 单元）、`modem-mnt.service`（挂 modem 分区、链 `image/modem_pr`）、`qcom-subsys-start.service/.timer`（拉 mpss/adsp/cdsp/slpi） | 固件 `qcom/sm8150/xiaomi/crux/{modem,adsp,cdsp,slpi}.mbn`；分区 `modemst1/2`、`fsc`、`fsg`（EFS） | ⚠️ 子系统能起、ModemManager 常驻；注册/数据未验证 |
 | **USB（ECM/ACM）** | `usbutils`、`libusb` | `usb-gadget-acm.service`、`usb-align.service`（ARP/路由对齐） | 供电 `qcom_usb_vbus-regulator.ko`（在 `modules/`）、`modules-load.d/crux-usb.conf` | ✅ 可用 |
 | **电源 / 充电 / 关机链** | `systemd` | `crux-charger-init.service`、`crux-markshutdown.service`、`crux-crashsave.service`、`dmesg-snap.service`、`power-snap.service`、`crux-kmsg-tap.service`、`99-printk-quiet.conf` | `pm8150b` charger/fuel-gauge 驱动 | ✅ 可用 |
-| **交换空间** | — | `crux-swap.service`（zram 4G 默认开；`/mnt/lroot` 上的 8G swapfile 由 `/etc/crux-swap.conf` 的 `LROOT_SWAP` 控制，**默认关**） | — | ✅ zram 可用 |
+| **交换空间** | — | `crux-swap.service`：`/etc/crux-swap.conf` 全参数化，`SWAP_ENABLE=0` **默认全部关闭**（zram 与 swapfile 都不建，并将已有 swap `swapoff -a`） | — | ⛔ 默认无 swap |
 | **外挂 X50 / SIM** | — | `x50-*` 单元与程序**按原路径就位但默认不 enable**（见 §5.7），开关 `crux-sim-x50` | 固件 `qcom/sdx50m/*` | ⛔ 未跑通，默认不启用 |
 | **相机** | — | — | — | ⛔ **未适配，本包不涉及** |
 
@@ -240,7 +240,7 @@ sudo ./mkimage.sh /root/out --fw-dir ./fw
 | `qsee-supplicant.service` / `qsee-app-loader@.service` | Qualcomm TEE 服务 / 应用加载器 | ✅ |
 | `crux-audio-route.service` | 开机把播放路由固定到扬声器通路（`QUAT_MI2S_RX Audio Mixer MultiMedia1=on`）；FE 没有 BE 时 open 会 EINVAL | ✅ |
 | `crux-time-sync.service` + `.timer` | 开机校时 + 每 6 小时兜底（本机 **RTC 无驱动**，时间会错到 30 天前，apt 立刻报 `Release not valid yet`） | ✅ |
-| `crux-swap.service` | zram 4G（zstd，prio 100）**默认启用**；`/mnt/lroot/swapfile` 8G 由 `/etc/crux-swap.conf` 控制，**默认关闭** | ✅ |
+| `crux-swap.service` | **默认全部关闭**（`SWAP_ENABLE=0`：不建 zram、不建 swapfile）。需要时在 `/etc/crux-swap.conf` 打开总闸并按需设 `ZRAM_MB` / `LROOT_SWAP` | ⛔ |
 | `crux-ufs-stable.service` / `ufs-nopm.service` | UFS 两种加固（标准 sysfs / QCOM 私有 sysfs），**互补不重复** | ✅ |
 | `crux-charger-init.service` | 开机设置 SMB5 充电电流 ICHG | ✅ |
 | `crux-crashsave.service` | 上一轮 dmesg 尾部写到 ESP（`LASTBOOT.TXT` / `CRASH.TXT`） | ✅ |
@@ -319,8 +319,8 @@ sudo ./mkimage.sh /root/out --fw-dir ./fw
 
 | 组成 | 落点 | 默认 | 打开方式 |
 |---|---|---|---|
-| zram 4 GiB（zstd，prio 100） | 内存压缩，不依赖分区 | ✅ 开 | 无需操作 |
-| 8 GiB swapfile（prio 10） | `/mnt/lroot`（`PARTLABEL=linux-root`，实测 `sda36` 64G） | ⛔ 关 | `/etc/crux-swap.conf` 改 `LROOT_SWAP=1`，fstab 加 `/mnt/lroot` 条目，`systemctl restart crux-swap` |
+| zram（内存压缩） | `ZRAM_MB`（MiB，**默认 0 = 不建**），`ZRAM_PRIO`（默认 100） | ⛔ 默认关 | `SWAP_ENABLE=1` + `ZRAM_MB=4096`，`systemctl restart crux-swap` |
+| 磁盘 swapfile | `LROOT_SWAP=1`（需另一块 `PARTLABEL=linux-root`；若 `/` 本身就叫 linux-root 会自动跳过），`LROOT_SWAP_MB`（默认 8192） | ⛔ 默认关 | 同左设置 + `systemctl restart crux-swap` |
 
 ---
 
@@ -339,7 +339,7 @@ rmtfs/tqftpserv/ModemManager/modem-mnt 常驻、**NPU（`/dev/msm_npu` + `npu-sv
 - `npu-boot.service` 指向 `/usr/lib/modules/$(uname -r)/extra/npu_boot24.ko`（不再依赖 `/root`）
 - `npu-svc` 默认只开 unix socket；需要局域网调用设 `NPU_SVC_TCP=1`（TCP 5300）
 - 服务顺序：`qrtr-ns` → `pd-mapper`/`tqftpserv` → `rmtfs`/`hexagonrpcd`
-- `crux-swap` 的 8G swapfile 依赖 `/mnt/lroot`；**若删掉那块分区**只留 zram 即可（默认就是关的）
+- `crux-swap` 默认不开任何 swap（zram 与 swapfile 全关）；需要时改 `/etc/crux-swap.conf`（见上表），不依赖任何额外分区。
 - SIM/X50 默认不 enable；要试就 `crux-sim-x50 enable`，出问题 `crux-sim-x50 disable`
 - **相机未适配**，本包不含任何相机相关配置
 - 本包只是**适配层 + 子系统用户态**；桌面（KDE/GNOME）、Docker 等按需自行安装
