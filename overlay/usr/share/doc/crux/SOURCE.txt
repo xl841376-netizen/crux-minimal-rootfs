@@ -1,0 +1,55 @@
+crux 最小 rootfs 对应源码说明（GPL 合规）
+最后更新：2026-10-20
+适用镜像：crux-rootfs-resolute-arm64-<日期>.tar.zst 及对应的 ESP 产物（Image、modules、initramfs、grub）
+
+一、本系统的开源/开源相关构件
+GPLv2（含内核、内核模块、VA-API 驱动）：
+  1. Linux 内核 Image
+     基线：Linux 7.3.0-rc5，commit 84f0eb223bd0
+     附加：crux 设备适配补丁（SM8150 平台支持、触摸/显示/音频/NPU/modem 相关改动）
+     源码仓库：https://github.com/xl841376-netizen/linux-mainline-full
+  2. 内核模块
+     /lib/modules/7.3.0-rc5-crux73/ 下的全部 .ko
+     仓库内 modules/：msm_qmp.ko、npu_boot24.ko、qcom_usb_vbus-regulator.ko
+     由上述内核源码树编译，编译配置需与镜像内 /boot/config-7.3.0-rc5-crux73 一致
+  3. VA-API 视频加速驱动 vpu_drv_video.so
+     上游：https://github.com/CFM880/iris-vaapi（commit 125413b4）
+     许可：GPLv2
+     源码：https://github.com/xl841376-netizen/crux-minimal-rootfs 的 src/iris-vaapi/
+
+BSD 3-Clause：
+  hexagonrpcd、libhexagonrpc、chrecd、rmtfs、pd-mapper、tqftpserv
+  上游：https://github.com/linux-msm/（hexagonrpc、rmtfs、pd-mapper、tqftpserv）
+
+二、如何获取完整对应源码
+方式一（推荐）：克隆以下两个仓库
+  git clone https://github.com/xl841376-netizen/linux-mainline-full
+  git clone https://github.com/xl841376-netizen/crux-minimal-rootfs
+内核切换/检出到与镜像对应的提交（基线 84f0eb223bd0 加 crux 补丁），
+VA-API 驱动位于 crux-minimal-rootfs 的 src/iris-vaapi/。
+
+方式二：若上述仓库不可访问，可通过项目发布页留言或通过仓库 issue 联系作者索取源码副本，
+作者将在合理期限内提供与二进制完全对应的源码归档。
+
+三、关于 vermagic 中的 -dirty
+镜像内模块的 vermagic 形如：
+  7.3.0-rc5-00037-g551c722f4080-dirty
+其中 -dirty 表示构建时源码树含有未提交改动（crux 适配补丁与构建脚本）。
+对应源码以 linux-mainline-full 仓库的分支 crux-sm8150-73 及其提交记录为准（当前对应 commit 84f0eb223bd0）；
+若你按该仓库构建后发现差异，请与作者联系核对补丁。
+
+四、构建可复现说明
+1) 内核：使用镜像内 /boot/config-7.3.0-rc5-crux73 作为 .config，交叉/原生编译 aarch64。
+2) 模块：随内核一同编译（in-tree），不使用外部 dkms。
+3) rootfs：仓库内 mkimage.sh 配合 deps/lists/sda37.list、overlay/、fw/（固件与预编译模块）构建。
+   fw/ 中的固件为专有二进制，不在开源许可范围内，不随源码提供。
+4) VA-API：在装有 libva-dev 与 Vulkan 头文件的环境中 make，产物为 build/vpu_drv_video.so，
+   放入 /usr/lib/aarch64-linux-gnu/dri/ 并配置 LIBVA_DRIVER_NAME=vpu。
+
+五、不适用本文件的内容
+- 固件（/lib/firmware 下的 Qualcomm 专有二进制）：不属于开源分发范围，不在 GPL 源码义务内。
+- Ubuntu 软件包：其源码由 Ubuntu 归档及各自上游提供，可在 /usr/share/doc/<包名>/copyright 查看来源。
+- 来源待确认的组件（npu、npuctl、npu-svc、ssccli、sscregistrygen）：未声明开源许可，不在本说明范围内。
+
+六、联系
+源码获取、补丁核对、许可问题，请通过项目仓库 issue 联系作者。

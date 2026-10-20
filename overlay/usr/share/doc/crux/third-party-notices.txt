@@ -1,0 +1,74 @@
+crux 最小 rootfs 第三方组件版权与许可声明
+最后更新：2026-10-20
+
+本文件列出本系统所包含或链接的第三方组件及其许可情况。各组件的完整许可文本以对应上游仓库中的 LICENSE / COPYING 为准。
+
+--------------------------------------------------------------------
+一、Linux 内核
+--------------------------------------------------------------------
+组件：Linux 内核及其模块
+版本：7.3.0-rc5（基线 commit 84f0eb223bd0），附加 crux 设备适配补丁
+许可：GNU General Public License v2（部分文件为 GPLv2 或 MIT/BSD 双许可，见各文件头部声明）
+版权：Linus Torvalds 及内核贡献者
+源码：https://github.com/xl841376-netizen/linux-mainline-full
+
+说明：
+本系统中随附的内核模块（msm_qmp.ko、npu_boot24.ko、qcom_usb_vbus-regulator.ko 以及 /lib/modules 下的其他 .ko）为上述内核源码编译产物，按 GPLv2 提供。获取与二进制版本对应的源码方式见同目录 SOURCE 文件。
+
+--------------------------------------------------------------------
+二、iris-vaapi（VA-API 视频加速驱动）
+--------------------------------------------------------------------
+组件：vpu_drv_video.so
+上游：https://github.com/CFM880/iris-vaapi
+许可：GNU General Public License v2（见本仓库 src/iris-vaapi/COPYING）
+源码：本仓库 src/iris-vaapi/
+
+--------------------------------------------------------------------
+三、Hexagon / QRTR 用户态组件
+--------------------------------------------------------------------
+组件：hexagonrpcd、libhexagonrpc、chrecd、rmtfs、pd-mapper、tqftpserv
+上游：https://github.com/linux-msm/hexagonrpc
+      https://github.com/linux-msm/rmtfs
+      https://github.com/linux-msm/pd-mapper
+      https://github.com/linux-msm/tqftpserv
+许可：BSD 3-Clause（以各上游仓库 LICENSE 为准，再分发需保留版权声明与许可文本）
+版权：各上游项目作者
+
+--------------------------------------------------------------------
+四、Ubuntu 基础系统与软件包
+--------------------------------------------------------------------
+组件：Ubuntu 26.04.1 LTS（resolute）aarch64 基础系统及 apt 安装的全部软件包
+许可：各自软件包许可（自由软件为主，少量 multiverse 组件另有条款），见 /usr/share/doc/<包名>/copyright
+说明：本系统为非官方修改版本，名称中的 Ubuntu 仅用于说明来源；Ubuntu 与 Canonical 为 Canonical Ltd. 的商标。
+
+--------------------------------------------------------------------
+五、GNOME 桌面
+--------------------------------------------------------------------
+组件：GNOME Shell、Mutter、GDM 及 GNOME 应用
+许可：GPLv2 / LGPLv2.1+ 等，见对应软件包的 copyright 文件
+说明：GNOME 名称为 GNOME Foundation 的商标，本系统非 GNOME 官方发行版。
+
+--------------------------------------------------------------------
+六、固件（专有二进制，不授予许可）
+--------------------------------------------------------------------
+组件：/lib/firmware 下的 Qualcomm 平台固件，包括但不限于基带（modem/mpss）、
+      DSP（adsp、cdsp、slpi）、GPU（a630）、视频（venus）、WiFi（WCN3990）等
+权利人：Qualcomm Technologies, Inc. 及其关联公司
+许可：无开源许可。仅随设备使用；本系统不授予任何再分发权利。
+说明：这些文件由使用者从自身持有的设备分区提取。请勿公开再分发含这些固件的完整镜像。
+
+--------------------------------------------------------------------
+七、来源待确认的组件
+--------------------------------------------------------------------
+组件：npu、npuctl、npu-svc、ssccli、sscregistrygen
+状态：来源与许可未确认，未声明为任何开源许可分发
+说明：若无法确认授权，建议从公开分发包中移除。
+
+--------------------------------------------------------------------
+八、其他
+--------------------------------------------------------------------
+- crux 自写的 systemd 单元、shell 脚本、udev 规则、UCM 配置、sysctl/modprobe 配置：
+  由本项目作者编写，随本项目一并提供，供个人使用与修改。
+- ALSA UCM、WirePlumber、PipeWire、NetworkManager、ModemManager 等均来自 Ubuntu 软件包，
+  遵循各自许可。
+- 本文件不构成法律意见；许可判断以各上游原文为准。
