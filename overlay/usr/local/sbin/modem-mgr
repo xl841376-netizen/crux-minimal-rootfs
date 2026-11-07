@@ -482,15 +482,9 @@ class Supervisor:
         return (not self.table.node_services(3)) and (not self._mhi0()) and (not self._loaders())
 
     def stop_loaders(self):
-        """停 loader（x50-efs-sync.service 是它的父，先停服务再补刀）"""
+        """停 loader（x50-efs-sync.service 已于 2026-11-07 删除，直接按 PID 杀）"""
         if not self._loaders():
             return True
-        try:
-            subprocess.run(["/bin/systemctl", "stop", "x50-efs-sync.service"],
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
-            log("[clean] stop x50-efs-sync.service")
-        except Exception as e:
-            log("[clean] stop efs-sync failed: %s" % e)
         for _ in range(5):
             if self.wait_for(lambda: not self._loaders(), timeout=3.0):
                 return True
